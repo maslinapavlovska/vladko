@@ -1,5 +1,6 @@
 import json
 import re
+from typing import Optional
 
 import httpx
 
@@ -7,54 +8,64 @@ from app.config import settings
 
 
 # ============================================================================
-# STAGE 1: Query Analysis Prompt
+# NEW: Deterministic MCQ Prompt - We TELL the LLM what was found
 # ============================================================================
-ANALYZE_MCQ_PROMPT = """Given a multiple choice question, return search terms to find the answer in documents.
-
-Question: {question}
-Options: {options}
-
-IMPORTANT: Keep all names and terms in their ORIGINAL script (Cyrillic stays Cyrillic, Latin stays Latin).
-DO NOT transliterate names. Use them EXACTLY as written in the options.
-
-Return ONLY a JSON object:
-{{
-  "search_terms": ["term1", "term2", ...],
-  "reasoning": "Brief explanation"
-}}
-
-The search_terms MUST include:
-1. Each option name EXACTLY as written (e.g., if option is "Херодот", include "Херодот" not "Herodot")
-2. Key concept words from the question"""
-
-
-# ============================================================================
-# STAGE 3: Evidence Reasoning Prompt
-# ============================================================================
-REASON_MCQ_PROMPT = """You must answer a multiple choice question using ONLY the document excerpts provided below.
+DETERMINISTIC_MCQ_PROMPT = """You are answering a multiple choice question. I have ALREADY searched the documents for you.
 
 QUESTION:
 {question}
 
-OPTIONS:
+ALL OPTIONS:
+{all_options}
+
+=== SEARCH RESULTS ===
+{search_status}
+
+{evidence_section}
+
+=== YOUR TASK ===
+{task_instruction}
+
+RESPONSE FORMAT (you MUST follow this exactly):
+Answer: [Your answer - either a letter+option OR "НЕ МОГА ДА ОПРЕДЕЛЯ" / "CANNOT DETERMINE"]
+Confidence: [HIGH if option found in documents, LOW if using web search, NONE if no answer]
+Evidence: "[Exact quote from the source that supports your answer]"
+Source: [filename, page X] OR [Web search]
+Justification: [2-3 sentences explaining WHY this is the correct answer based on the evidence]
+"""
+
+TASK_FOUND_ONE = """Based on my search, ONLY "{found_option}" was found in the documents.
+You MUST select this option since it's the only one with documentary evidence.
+Explain why the document text supports this as the answer."""
+
+TASK_FOUND_MULTIPLE = """Multiple options were found in the documents: {found_options}
+Review the evidence for each and select the one that BEST answers the question.
+You MUST choose from these options only."""
+
+TASK_FOUND_NONE = """NONE of the answer options were found in the uploaded documents.
+{web_results}
+If web results are provided, use them to answer. Otherwise respond with:
+Answer: НЕ МОГА ДА ОПРЕДЕЛЯ / CANNOT DETERMINE
+Confidence: NONE
+Evidence: "No matching content found in documents"
+Source: N/A
+Justification: The answer options do not appear in the uploaded documents."""
+
+TASK_WEB_FALLBACK = """The answer was not in the documents, but I found this from web search:
+{web_summary}
+
+Use this web information to answer the question."""
+
+
+# ============================================================================
+# Web Search Integration Prompt
+# ============================================================================
+WEB_SEARCH_PROMPT = """Search query for: {question}
+
+I need to find which of these options is correct:
 {options}
 
-DOCUMENT EXCERPTS (search results):
-{evidence}
-
-CRITICAL RULES:
-1. You can ONLY select an answer if that exact answer option NAME appears in the excerpts above
-2. If an option name (like "Херодот" or "Ратцел") is NOT found in any excerpt, you CANNOT select it
-3. DO NOT use your external knowledge - ONLY what is written in the excerpts
-4. If none of the option names appear in the excerpts, say "Не мога да намеря отговора в документите"
-
-RESPOND IN THIS FORMAT:
-Answer: [Letter]) [Option text] - OR - "Не мога да намеря отговора в документите"
-Evidence: "[Exact quote containing the answer option name]"
-Source: [filename], page [X]
-Explanation: [Why this option is correct based on the excerpt]
-
-IMPORTANT: Only select options that are EXPLICITLY mentioned in the excerpts! If you don't see the name in the excerpts, don't select it."""
+Provide factual information about which option is historically/factually correct."""
 
 
 # ============================================================================
@@ -66,16 +77,12 @@ CRITICAL RULES:
 1. ONLY use information from the provided context. DO NOT use external knowledge.
 2. Always cite sources: [Document: filename, Page: X]
 3. Answer in the same language as the question.
-
-FOR MULTIPLE CHOICE QUESTIONS (with options А, Б, В, Г, Д or A, B, C, D, E):
-- Start your answer with the correct letter option (e.g., "Б) Херодот")
-- Then explain WHY this is correct based on the context
-- Quote the relevant text from the document that supports your answer
-- If you cannot find the answer in the context, say "Не мога да намеря отговора в предоставените документи"
+4. If you cannot find the answer in the context, clearly state: "Не мога да намеря отговора в предоставените документи" / "I cannot find the answer in the provided documents"
 
 FOR OPEN QUESTIONS:
 - Provide a direct, concise answer
 - Cite the source document and page
+- Include a brief justification for your answer
 
 If the context doesn't contain enough information, clearly state this."""
 
@@ -101,21 +108,86 @@ Context from documents:
 
 Question: {question}
 
-Answer (remember to cite sources with document name and page number):"""
+Answer (remember to cite sources with document name and page number, and provide justification):"""
 
     return prompt
 
 
-async def generate_answer(question: str, context_chunks: list[dict]) -> tuple[str, str]:
+def build_deterministic_mcq_prompt(
+    question: str,
+    options: list[str],
+    found_options: dict[str, list[dict]],
+    web_results: Optional[str] = None
+) -> str:
     """
-    Generate an answer using Ollama LLM.
+    Build a prompt where we TELL the LLM what was found (deterministic).
+    This prevents hallucination because the LLM doesn't choose - we tell it.
+    """
+    # Format all options with letters
+    all_options = "\n".join(
+        f"{chr(ord('А') + i)}) {opt}" for i, opt in enumerate(options)
+    )
+    
+    # Determine search status and evidence
+    if len(found_options) == 0:
+        search_status = "❌ NO OPTIONS FOUND in the uploaded documents."
+        evidence_section = ""
+        
+        if web_results:
+            task_instruction = TASK_WEB_FALLBACK.format(web_summary=web_results)
+        else:
+            task_instruction = TASK_FOUND_NONE.format(web_results="No web search results available.")
+    
+    elif len(found_options) == 1:
+        found_option = list(found_options.keys())[0]
+        search_status = f"✓ FOUND: \"{found_option}\" appears in the documents."
+        
+        # Build evidence section
+        evidence_parts = []
+        for opt, evidences in found_options.items():
+            evidence_parts.append(f"\n### Evidence for \"{opt}\":")
+            for ev in evidences[:3]:  # Limit to 3 evidence snippets per option
+                evidence_parts.append(
+                    f"  Source: {ev['filename']}, page {ev['page']}\n"
+                    f"  Text: \"{ev['excerpt'][:500]}...\""
+                )
+        evidence_section = "\n".join(evidence_parts)
+        
+        task_instruction = TASK_FOUND_ONE.format(found_option=found_option)
+    
+    else:
+        found_list = list(found_options.keys())
+        search_status = f"✓ FOUND MULTIPLE: {', '.join(found_list)} appear in the documents."
+        
+        # Build evidence section for each found option
+        evidence_parts = []
+        for opt, evidences in found_options.items():
+            evidence_parts.append(f"\n### Evidence for \"{opt}\":")
+            for ev in evidences[:2]:
+                evidence_parts.append(
+                    f"  Source: {ev['filename']}, page {ev['page']}\n"
+                    f"  Text: \"{ev['excerpt'][:400]}...\""
+                )
+        evidence_section = "\n".join(evidence_parts)
+        
+        task_instruction = TASK_FOUND_MULTIPLE.format(
+            found_options=", ".join(f'"{opt}"' for opt in found_list)
+        )
+    
+    return DETERMINISTIC_MCQ_PROMPT.format(
+        question=question,
+        all_options=all_options,
+        search_status=search_status,
+        evidence_section=evidence_section,
+        task_instruction=task_instruction,
+    )
 
-    Takes the question and relevant context chunks, builds a prompt,
-    and returns tuple of (answer, prompt_sent).
-    """
+
+async def generate_answer(question: str, context_chunks: list[dict]) -> tuple[str, str]:
+    """Generate an answer using Ollama LLM for non-MCQ questions."""
     prompt = build_prompt(question, context_chunks)
 
-    async with httpx.AsyncClient(timeout=300.0) as client:  # 5 min for large models
+    async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(
             f"{settings.ollama_host}/api/generate",
             json={
@@ -123,7 +195,7 @@ async def generate_answer(question: str, context_chunks: list[dict]) -> tuple[st
                 "prompt": prompt,
                 "stream": False,
                 "options": {
-                    "temperature": 0.3,  # Lower for factual/exam questions
+                    "temperature": 0.3,
                 },
             },
         )
@@ -132,14 +204,164 @@ async def generate_answer(question: str, context_chunks: list[dict]) -> tuple[st
         return data["response"], prompt
 
 
-async def analyze_mcq_question(question: str, options: list[str]) -> dict:
+async def generate_deterministic_mcq_answer(
+    question: str,
+    options: list[str],
+    found_options: dict[str, list[dict]],
+    web_results: Optional[str] = None
+) -> tuple[str, str]:
     """
-    Stage 1: Ask LLM what to search for in documents.
+    Generate MCQ answer using deterministic prompt.
+    The LLM is TOLD what was found, not asked to find it.
+    """
+    prompt = build_deterministic_mcq_prompt(
+        question=question,
+        options=options,
+        found_options=found_options,
+        web_results=web_results
+    )
+    
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        response = await client.post(
+            f"{settings.ollama_host}/api/generate",
+            json={
+                "model": settings.chat_model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.1,  # Very low for deterministic output
+                },
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["response"], prompt
 
-    Returns dict with:
-    - search_terms: list of terms to grep for
-    - reasoning: LLM's explanation of why these terms
+
+async def search_web_for_answer(question: str, options: list[str]) -> Optional[dict]:
     """
+    Placeholder for web search integration.
+    In production, integrate with a search API (SerpAPI, Brave, etc.)
+    
+    Returns dict with:
+    - answer: the likely correct option
+    - summary: explanation from web
+    - sources: list of URLs
+    """
+    # TODO: Implement actual web search
+    # For now, return None to indicate no web results
+    # 
+    # Example integration with httpx:
+    # async with httpx.AsyncClient() as client:
+    #     response = await client.get(
+    #         "https://api.search.brave.com/res/v1/web/search",
+    #         headers={"X-Subscription-Token": BRAVE_API_KEY},
+    #         params={"q": f"{question} {' '.join(options)}"}
+    #     )
+    #     results = response.json()
+    #     # Parse and return relevant info
+    
+    return None
+
+
+def parse_llm_response(response: str) -> dict:
+    """
+    Parse the structured LLM response to extract components.
+    Returns dict with: answer, confidence, evidence, source, justification
+    """
+    result = {
+        "answer": None,
+        "confidence": None,
+        "evidence": None,
+        "source": None,
+        "justification": None,
+        "raw_response": response,
+    }
+    
+    # Parse each field
+    patterns = {
+        "answer": r"Answer:\s*(.+?)(?=\n|Confidence:|$)",
+        "confidence": r"Confidence:\s*(.+?)(?=\n|Evidence:|$)",
+        "evidence": r"Evidence:\s*[\"']?(.+?)[\"']?(?=\n|Source:|$)",
+        "source": r"Source:\s*(.+?)(?=\n|Justification:|$)",
+        "justification": r"Justification:\s*(.+?)(?=\n\n|$)",
+    }
+    
+    for field, pattern in patterns.items():
+        match = re.search(pattern, response, re.IGNORECASE | re.DOTALL)
+        if match:
+            result[field] = match.group(1).strip()
+    
+    return result
+
+
+def validate_answer_against_evidence(
+    parsed_response: dict,
+    found_options: dict[str, list[dict]]
+) -> dict:
+    """
+    Post-validation: Check if the LLM's answer matches what we found.
+    Adds a 'validated' field and 'validation_note' to the response.
+    """
+    result = parsed_response.copy()
+    result["validated"] = False
+    result["validation_note"] = ""
+    
+    answer = result.get("answer", "")
+    if not answer:
+        result["validation_note"] = "No answer provided"
+        return result
+    
+    # Check if answer contains one of the found options
+    answer_lower = answer.lower()
+    
+    for found_opt in found_options.keys():
+        if found_opt.lower() in answer_lower:
+            result["validated"] = True
+            result["validation_note"] = f"Answer '{found_opt}' verified in documents"
+            return result
+    
+    # Check for "cannot determine" responses
+    cannot_determine_phrases = [
+        "не мога да определя",
+        "cannot determine", 
+        "не мога да намеря",
+        "cannot find",
+        "n/a"
+    ]
+    
+    for phrase in cannot_determine_phrases:
+        if phrase in answer_lower:
+            result["validated"] = True
+            result["validation_note"] = "Correctly indicated answer not found"
+            return result
+    
+    # If we reach here, the LLM hallucinated
+    result["validation_note"] = f"WARNING: LLM selected '{answer}' but only these were found in documents: {list(found_options.keys())}"
+    
+    return result
+
+
+# ============================================================================
+# Legacy functions (kept for backwards compatibility)
+# ============================================================================
+
+ANALYZE_MCQ_PROMPT = """Given a multiple choice question, return search terms to find the answer in documents.
+
+Question: {question}
+Options: {options}
+
+IMPORTANT: Keep all names and terms in their ORIGINAL script (Cyrillic stays Cyrillic, Latin stays Latin).
+
+Return ONLY a JSON object:
+{{
+  "search_terms": ["term1", "term2", ...],
+  "reasoning": "Brief explanation"
+}}"""
+
+
+async def analyze_mcq_question(question: str, options: list[str]) -> dict:
+    """Stage 1: Ask LLM what to search for in documents."""
     prompt = ANALYZE_MCQ_PROMPT.format(
         question=question,
         options=", ".join(options)
@@ -153,7 +375,7 @@ async def analyze_mcq_question(question: str, options: list[str]) -> dict:
                 "prompt": prompt,
                 "stream": False,
                 "options": {
-                    "temperature": 0.1,  # Very low for consistent JSON output
+                    "temperature": 0.1,
                 },
             },
         )
@@ -161,11 +383,9 @@ async def analyze_mcq_question(question: str, options: list[str]) -> dict:
         data = response.json()
         raw_response = data["response"]
 
-    # Parse JSON from response
     llm_terms = []
     reasoning = ""
     try:
-        # Try to extract JSON from the response
         json_match = re.search(r'\{[^{}]*\}', raw_response, re.DOTALL)
         if json_match:
             result = json.loads(json_match.group())
@@ -174,9 +394,7 @@ async def analyze_mcq_question(question: str, options: list[str]) -> dict:
     except json.JSONDecodeError:
         reasoning = "Failed to parse LLM response"
 
-    # ALWAYS include original options to ensure they're searched
-    # Combine LLM suggestions with original options (options take priority)
-    all_terms = list(options)  # Start with original options
+    all_terms = list(options)
     for term in llm_terms:
         if term not in all_terms:
             all_terms.append(term)
@@ -193,47 +411,14 @@ async def reason_over_evidence(
     options: list[str],
     grep_results: list[dict]
 ) -> tuple[str, str]:
-    """
-    Stage 3: LLM reasons over grep results to pick the correct answer.
-
-    Returns tuple of (answer, prompt_sent).
-    """
-    # Format options with letters
-    options_formatted = "\n".join(
-        f"{chr(ord('А') + i)}) {opt}" for i, opt in enumerate(options)
-    )
-
-    # Format evidence from grep results
-    if grep_results:
-        evidence_parts = []
-        for i, result in enumerate(grep_results[:15], 1):  # Limit to 15 results
-            evidence_parts.append(
-                f"[{i}] Term: \"{result['term']}\"\n"
-                f"    Source: {result['filename']}, page {result['page']}\n"
-                f"    Context:\n{result['full_excerpt']}"
-            )
-        evidence = "\n\n".join(evidence_parts)
-    else:
-        evidence = "(No matches found in documents)"
-
-    prompt = REASON_MCQ_PROMPT.format(
+    """Legacy function - now redirects to deterministic approach."""
+    # This is kept for backwards compatibility but should use the new approach
+    from app.services.vector_store import vector_store
+    
+    found_options = vector_store.validate_options_in_text(options, grep_results)
+    return await generate_deterministic_mcq_answer(
         question=question,
-        options=options_formatted,
-        evidence=evidence,
+        options=options,
+        found_options=found_options,
+        web_results=None
     )
-
-    async with httpx.AsyncClient(timeout=300.0) as client:
-        response = await client.post(
-            f"{settings.ollama_host}/api/generate",
-            json={
-                "model": settings.chat_model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.2,  # Low for factual reasoning
-                },
-            },
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data["response"], prompt

@@ -22,7 +22,6 @@ STOPWORDS = {
 }
 
 # MCQ option patterns (Bulgarian and English)
-# Matches А) Option text Б) ... or A) Option text B) ...
 MCQ_PATTERN = re.compile(
     r'[АБВГДABCDE]\s*\)\s*(.+?)(?=\s+[АБВГДABCDE]\s*\)|$)',
     re.IGNORECASE
@@ -41,24 +40,17 @@ class VectorStore:
         )
 
     async def add_chunks(self, filename: str, chunks: list[dict]) -> None:
-        """
-        Add document chunks to the vector store.
-
-        Each chunk should have: text, page, chunk_id
-        """
+        """Add document chunks to the vector store."""
         if not chunks:
             return
 
-        # Generate embeddings for all chunks
         texts = [chunk["text"] for chunk in chunks]
         embeddings = await get_embeddings_batch(texts)
 
-        # Prepare data for ChromaDB
         ids = [f"{filename}_p{chunk['page']}_c{chunk['chunk_id']}" for chunk in chunks]
         documents = texts
         metadatas = [{"filename": filename, "page": chunk["page"]} for chunk in chunks]
 
-        # Add to collection
         self.collection.add(
             ids=ids,
             embeddings=embeddings,
@@ -67,36 +59,20 @@ class VectorStore:
         )
 
     def _detect_mcq_options(self, query: str) -> tuple[bool, list[str]]:
-        """
-        Detect if query is MCQ format and extract answer options.
-        Returns (is_mcq, list of option texts).
-        """
-        # Look for patterns like "А) Херодот" or "A) Herodot"
+        """Detect if query is MCQ format and extract answer options."""
         options = MCQ_PATTERN.findall(query)
-
-        if len(options) >= 2:  # At least 2 options to be considered MCQ
-            # Clean up options - strip whitespace
+        if len(options) >= 2:
             cleaned = [opt.strip() for opt in options if opt.strip()]
             return True, cleaned
-
         return False, []
 
     def _extract_keywords(self, query: str, mcq_options: list[str] = None) -> list[str]:
-        """
-        Extract meaningful keywords from query.
-        Handles Bulgarian and English text.
-        If mcq_options provided, adds those as high-priority keywords.
-        """
-        # Regex to match words including Cyrillic characters
+        """Extract meaningful keywords from query."""
         words = re.findall(r'[\w\u0400-\u04FF]+', query.lower())
-
-        # Filter: remove stopwords and very short words
         keywords = [w for w in words if w not in STOPWORDS and len(w) > 2]
 
-        # For MCQ: add each option as a keyword (these are high-value search terms)
         if mcq_options:
             for option in mcq_options:
-                # Extract words from each option
                 option_words = re.findall(r'[\w\u0400-\u04FF]+', option.lower())
                 for word in option_words:
                     if word not in keywords and len(word) > 2:
@@ -105,11 +81,7 @@ class VectorStore:
         return keywords
 
     def _keyword_search(self, all_data: dict, keywords: list[str]) -> dict[str, dict]:
-        """
-        Search for exact keyword matches in chunks.
-
-        Returns dict mapping chunk_id to match info.
-        """
+        """Search for exact keyword matches in chunks."""
         results = {}
 
         if not keywords or not all_data.get("documents"):
@@ -119,11 +91,9 @@ class VectorStore:
             chunk_id = all_data["ids"][i]
             doc_lower = doc.lower()
 
-            # Find which keywords appear in this chunk
             matches = [kw for kw in keywords if kw in doc_lower]
 
             if matches:
-                # Score = percentage of keywords that matched
                 score = len(matches) / len(keywords)
                 results[chunk_id] = {
                     "text": doc,
@@ -143,19 +113,13 @@ class VectorStore:
         keywords: list[str],
         top_k: int,
     ) -> list[dict[str, Any]]:
-        """
-        Merge keyword and semantic results with combined scoring.
-        Prioritizes chunks that match both methods.
-        """
+        """Merge keyword and semantic results with combined scoring."""
         merged = {}
 
-        # Step 1: Add all semantic results
         if semantic_results.get("documents") and semantic_results["documents"][0]:
             for i, doc in enumerate(semantic_results["documents"][0]):
                 chunk_id = semantic_results["ids"][0][i]
                 distance = semantic_results["distances"][0][i]
-
-                # Convert cosine distance to similarity (0=identical, 2=opposite)
                 semantic_score = max(0, 1 - distance)
 
                 merged[chunk_id] = {
@@ -169,25 +133,21 @@ class VectorStore:
                     "match_type": "semantic",
                 }
 
-        # Step 2: Merge in keyword results
         for chunk_id, kw_data in keyword_results.items():
             if chunk_id in merged:
-                # This chunk matched BOTH methods - very high signal
                 merged[chunk_id]["keyword_score"] = kw_data["keyword_score"]
                 merged[chunk_id]["keyword_matches"] = kw_data["keyword_matches"]
                 merged[chunk_id]["match_type"] = "both"
             else:
-                # Keyword-only match (semantic search missed it)
                 merged[chunk_id] = {
                     **kw_data,
                     "semantic_score": 0,
                     "match_type": "keyword",
                 }
 
-        # Step 3: Calculate combined score
-        KEYWORD_WEIGHT = 0.7   # Keywords are strong signal for factual queries
-        SEMANTIC_WEIGHT = 0.3  # Semantic helps with paraphrasing
-        BOTH_BONUS = 0.2       # Reward chunks matching both methods
+        KEYWORD_WEIGHT = 0.7
+        SEMANTIC_WEIGHT = 0.3
+        BOTH_BONUS = 0.2
 
         for chunk_id, data in merged.items():
             both_bonus = BOTH_BONUS if data["match_type"] == "both" else 0
@@ -197,14 +157,12 @@ class VectorStore:
                 both_bonus
             )
 
-        # Step 4: Sort and return top-k
         sorted_results = sorted(
             merged.values(),
             key=lambda x: x["combined_score"],
             reverse=True,
         )[:top_k]
 
-        # Format output
         return [
             {
                 "text": r["text"],
@@ -223,33 +181,17 @@ class VectorStore:
         ]
 
     async def search(self, query: str, top_k: int = 5) -> tuple[list[dict], list[str], dict]:
-        """
-        Hybrid search: combine keyword and semantic search.
-
-        Returns tuple of (results, keywords_extracted, search_info).
-        Each result has: text, filename, page, match_type, keyword_matches, scores
-        search_info contains: is_mcq, mcq_options
-        """
-        # Check if collection is empty
+        """Hybrid search: combine keyword and semantic search."""
         if self.collection.count() == 0:
             return [], [], {"is_mcq": False, "mcq_options": []}
 
-        # Step 1: Detect if this is a multiple choice question
         is_mcq, mcq_options = self._detect_mcq_options(query)
-
-        # For MCQ, increase top_k to get more context
         effective_top_k = top_k * 2 if is_mcq else top_k
 
-        # Step 2: Extract keywords (including MCQ options if present)
         keywords = self._extract_keywords(query, mcq_options if is_mcq else None)
-
-        # Step 3: Get all chunks for keyword search
         all_data = self.collection.get(include=["documents", "metadatas"])
-
-        # Step 4: Keyword search (grep-style)
         keyword_results = self._keyword_search(all_data, keywords)
 
-        # Step 5: Semantic search
         query_embedding = await get_embedding(query)
         semantic_results = self.collection.query(
             query_embeddings=[query_embedding],
@@ -257,7 +199,6 @@ class VectorStore:
             include=["documents", "metadatas", "distances"],
         )
 
-        # Step 6: Merge and rank
         merged = self._merge_results(keyword_results, semantic_results, keywords, effective_top_k)
 
         search_info = {
@@ -272,26 +213,8 @@ class VectorStore:
         search_terms: list[str],
         context_lines: int = 3
     ) -> list[dict]:
-        """
-        Grep-style search: find exact matches with surrounding context.
-
-        For each search term, finds all occurrences in stored documents
-        and returns the matching line plus N lines before/after.
-
-        Returns list of:
-        {
-            "term": "херодот",
-            "filename": "geo.pdf",
-            "page": 15,
-            "match_line": "Херодот е смятан за баща...",
-            "context_before": ["line1", "line2"],
-            "context_after": ["line3", "line4"],
-            "full_excerpt": "...before...>>> MATCH ...after..."
-        }
-        """
+        """Grep-style search: find exact matches with surrounding context."""
         results = []
-
-        # Get all documents from the collection
         all_data = self.collection.get(include=["documents", "metadatas"])
 
         if not all_data.get("documents"):
@@ -305,21 +228,17 @@ class VectorStore:
             for term in search_terms:
                 term_lower = term.lower()
 
-                # Check if term exists in this document at all
                 if term_lower not in doc_lower:
                     continue
 
-                # Find which line(s) contain the match
                 for line_num, line in enumerate(lines):
                     if term_lower in line.lower():
-                        # Extract context lines before and after
                         start = max(0, line_num - context_lines)
                         end = min(len(lines), line_num + 1 + context_lines)
 
                         before = lines[start:line_num]
                         after = lines[line_num + 1:end]
 
-                        # Build full excerpt with highlighted match line
                         excerpt_lines = (
                             before +
                             [f">>> {line.strip()}"] +
@@ -338,9 +257,93 @@ class VectorStore:
 
         return results
 
+    def validate_options_in_text(
+        self,
+        options: list[str],
+        grep_results: list[dict]
+    ) -> dict[str, list[dict]]:
+        """
+        CRITICAL: Deterministically check which MCQ options appear in the retrieved text.
+        
+        Returns a dict mapping each option to the evidence where it was found.
+        This is the KEY fix for hallucination - we don't ask the LLM to find options,
+        we TELL it which options were found.
+        """
+        found_options = {}
+        
+        # Combine all retrieved text
+        all_text = ""
+        for result in grep_results:
+            all_text += " " + result.get("full_excerpt", "") + " " + result.get("match_line", "")
+        
+        all_text_lower = all_text.lower()
+        
+        for option in options:
+            option_lower = option.lower().strip()
+            
+            # Check if option appears in any retrieved text
+            if option_lower in all_text_lower:
+                # Find all evidence snippets containing this option
+                evidence = []
+                for result in grep_results:
+                    excerpt_lower = result.get("full_excerpt", "").lower()
+                    match_line_lower = result.get("match_line", "").lower()
+                    
+                    if option_lower in excerpt_lower or option_lower in match_line_lower:
+                        evidence.append({
+                            "filename": result["filename"],
+                            "page": result["page"],
+                            "excerpt": result["full_excerpt"],
+                            "match_line": result["match_line"],
+                        })
+                
+                if evidence:
+                    found_options[option] = evidence
+        
+        return found_options
+
+    def get_all_text_for_search(self) -> str:
+        """Get all document text for comprehensive option search."""
+        all_data = self.collection.get(include=["documents"])
+        if not all_data.get("documents"):
+            return ""
+        return " ".join(all_data["documents"])
+
+    def find_option_in_all_documents(self, option: str) -> list[dict]:
+        """
+        Search for a specific option across ALL documents (not just grep results).
+        Returns list of matches with page/file info.
+        """
+        results = []
+        all_data = self.collection.get(include=["documents", "metadatas"])
+        
+        if not all_data.get("documents"):
+            return results
+        
+        option_lower = option.lower().strip()
+        
+        for i, doc in enumerate(all_data["documents"]):
+            if option_lower in doc.lower():
+                # Find the specific line containing the option
+                lines = doc.split('\n')
+                for line_num, line in enumerate(lines):
+                    if option_lower in line.lower():
+                        # Get context
+                        start = max(0, line_num - 2)
+                        end = min(len(lines), line_num + 3)
+                        context = "\n".join(lines[start:end])
+                        
+                        results.append({
+                            "filename": all_data["metadatas"][i]["filename"],
+                            "page": all_data["metadatas"][i]["page"],
+                            "match_line": line.strip(),
+                            "context": context,
+                        })
+        
+        return results
+
     def delete_document(self, filename: str) -> None:
         """Delete all chunks for a document."""
-        # Get all IDs for this document
         results = self.collection.get(
             where={"filename": filename},
             include=[],

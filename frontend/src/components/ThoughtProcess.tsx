@@ -1,5 +1,18 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, Search, Zap, Brain, ListChecks, FileSearch, MessageSquare } from 'lucide-react';
+import { 
+  ChevronDown, 
+  ChevronRight, 
+  Search, 
+  Zap, 
+  Brain, 
+  ListChecks, 
+  FileSearch, 
+  MessageSquare,
+  CheckCircle,
+  XCircle,
+  AlertTriangle,
+  Globe
+} from 'lucide-react';
 import type { Reasoning } from '../types';
 
 interface ThoughtProcessProps {
@@ -11,8 +24,9 @@ export function ThoughtProcess({ reasoning }: ThoughtProcessProps) {
   const [showPrompt, setShowPrompt] = useState(false);
   const [showGrepDetails, setShowGrepDetails] = useState(false);
 
-  // Check if this is a two-stage MCQ response
   const isTwoStageMCQ = reasoning.stage1_analysis || reasoning.stage2_grep_results;
+  const hasValidation = reasoning.options_validation && reasoning.options_validation.length > 0;
+  const hasJustification = reasoning.justification;
 
   return (
     <div className="w-full mt-2">
@@ -46,15 +60,121 @@ export function ThoughtProcess({ reasoning }: ThoughtProcessProps) {
             </div>
           )}
 
+          {/* NEW: Options Validation Display */}
+          {hasValidation && (
+            <div className="bg-white border border-gray-200 rounded p-2">
+              <div className="flex items-center gap-1 font-medium text-gray-800 mb-2">
+                <Search className="w-4 h-4" />
+                Document Search Results (Deterministic)
+              </div>
+              <div className="space-y-1">
+                {reasoning.options_validation!.map((opt, i) => (
+                  <div 
+                    key={i} 
+                    className={`flex items-center gap-2 p-1.5 rounded text-xs ${
+                      opt.found_in_documents 
+                        ? 'bg-green-50 border border-green-200' 
+                        : 'bg-gray-50 border border-gray-200'
+                    }`}
+                  >
+                    {opt.found_in_documents ? (
+                      <CheckCircle className="w-4 h-4 text-green-600 flex-shrink-0" />
+                    ) : (
+                      <XCircle className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                    )}
+                    <span className={opt.found_in_documents ? 'font-medium text-green-800' : 'text-gray-500'}>
+                      {opt.option}
+                    </span>
+                    {opt.found_in_documents && (
+                      <span className="text-green-600 ml-auto">
+                        {opt.evidence_count} match{opt.evidence_count !== 1 ? 'es' : ''} 
+                        {opt.sources.length > 0 && ` (${opt.sources[0]})`}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* NEW: Answer Justification Display */}
+          {hasJustification && (
+            <div className={`border rounded p-2 ${
+              reasoning.justification!.validated 
+                ? 'bg-green-50 border-green-300' 
+                : 'bg-yellow-50 border-yellow-300'
+            }`}>
+              <div className="flex items-center gap-1 font-medium mb-2">
+                {reasoning.justification!.validated ? (
+                  <>
+                    <CheckCircle className="w-4 h-4 text-green-600" />
+                    <span className="text-green-800">Answer Verified</span>
+                  </>
+                ) : (
+                  <>
+                    <AlertTriangle className="w-4 h-4 text-yellow-600" />
+                    <span className="text-yellow-800">Validation Warning</span>
+                  </>
+                )}
+                <span className={`ml-auto px-2 py-0.5 rounded text-xs ${
+                  reasoning.justification!.confidence === 'HIGH' 
+                    ? 'bg-green-200 text-green-800'
+                    : reasoning.justification!.confidence === 'LOW'
+                    ? 'bg-yellow-200 text-yellow-800'
+                    : 'bg-gray-200 text-gray-800'
+                }`}>
+                  {reasoning.justification!.confidence} confidence
+                </span>
+              </div>
+              
+              {reasoning.justification!.evidence_quote && (
+                <div className="text-xs mb-1">
+                  <span className="font-medium">Evidence: </span>
+                  <span className="italic">"{reasoning.justification!.evidence_quote}"</span>
+                </div>
+              )}
+              
+              {reasoning.justification!.source && (
+                <div className="text-xs mb-1">
+                  <span className="font-medium">Source: </span>
+                  {reasoning.justification!.source}
+                </div>
+              )}
+              
+              {reasoning.justification!.validation_note && (
+                <div className={`text-xs mt-1 p-1 rounded ${
+                  reasoning.justification!.validated 
+                    ? 'bg-green-100 text-green-700' 
+                    : 'bg-yellow-100 text-yellow-700'
+                }`}>
+                  {reasoning.justification!.validation_note}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Web Search Indicator */}
+          {reasoning.used_web_search && (
+            <div className="bg-blue-50 border border-blue-200 rounded p-2">
+              <div className="flex items-center gap-1 text-blue-800">
+                <Globe className="w-4 h-4" />
+                <span className="font-medium">Web Search Used</span>
+              </div>
+              <div className="text-xs text-blue-600 mt-1">
+                Answer not found in documents - web search fallback activated
+              </div>
+            </div>
+          )}
+
           {/* ===== TWO-STAGE MCQ DISPLAY ===== */}
-          {isTwoStageMCQ ? (
+          {isTwoStageMCQ && (
             <>
               {/* Stage 1: LLM Query Analysis */}
               {reasoning.stage1_analysis && (
                 <div className="bg-blue-50 border border-blue-200 rounded p-2">
                   <div className="flex items-center gap-1 font-medium text-blue-800 mb-1">
                     <MessageSquare className="w-4 h-4" />
-                    Stage 1: Query Analysis
+                    Stage 1: Search Terms Generated
                   </div>
                   <div className="text-xs text-blue-700 mb-2">
                     {reasoning.stage1_analysis.reasoning}
@@ -80,7 +200,6 @@ export function ThoughtProcess({ reasoning }: ThoughtProcessProps) {
                     Stage 2: Document Matches ({reasoning.stage2_grep_results.length})
                   </div>
 
-                  {/* Summary of matches by term */}
                   <div className="text-xs text-green-700 mb-2">
                     {Array.from(new Set(reasoning.stage2_grep_results.map(r => r.term))).map((term, i) => {
                       const count = reasoning.stage2_grep_results!.filter(r => r.term === term).length;
@@ -92,7 +211,6 @@ export function ThoughtProcess({ reasoning }: ThoughtProcessProps) {
                     })}
                   </div>
 
-                  {/* Toggle for detailed grep results */}
                   <button
                     onClick={() => setShowGrepDetails(!showGrepDetails)}
                     className="text-xs text-green-600 hover:text-green-700 underline"
@@ -121,7 +239,6 @@ export function ThoughtProcess({ reasoning }: ThoughtProcessProps) {
                 </div>
               )}
 
-              {/* No matches warning */}
               {reasoning.stage2_grep_results && reasoning.stage2_grep_results.length === 0 && (
                 <div className="bg-red-50 border border-red-200 rounded p-2">
                   <div className="text-xs text-red-700">
@@ -130,64 +247,64 @@ export function ThoughtProcess({ reasoning }: ThoughtProcessProps) {
                 </div>
               )}
             </>
-          ) : (
-            /* ===== STANDARD HYBRID SEARCH DISPLAY ===== */
+          )}
+
+          {/* ===== STANDARD HYBRID SEARCH DISPLAY ===== */}
+          {!isTwoStageMCQ && (
             <>
-              {/* Extracted Keywords */}
-              <div>
-                <div className="flex items-center gap-1 font-medium text-purple-800 mb-1">
-                  <Search className="w-4 h-4" />
-                  Keywords extracted
-                </div>
-                <div className="flex flex-wrap gap-1">
-                  {reasoning.keywords_extracted && reasoning.keywords_extracted.length > 0 ? (
-                    reasoning.keywords_extracted.map((kw, i) => (
+              {reasoning.keywords_extracted && reasoning.keywords_extracted.length > 0 && (
+                <div>
+                  <div className="flex items-center gap-1 font-medium text-purple-800 mb-1">
+                    <Search className="w-4 h-4" />
+                    Keywords extracted
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {reasoning.keywords_extracted.map((kw, i) => (
                       <span
                         key={i}
                         className="px-2 py-0.5 bg-purple-200 text-purple-800 rounded text-xs"
                       >
                         {kw}
                       </span>
-                    ))
-                  ) : (
-                    <span className="text-gray-500 text-xs">No keywords extracted</span>
-                  )}
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
 
-              {/* Retrieved Chunks */}
-              <div>
-                <div className="flex items-center gap-1 font-medium text-purple-800 mb-1">
-                  <Zap className="w-4 h-4" />
-                  Retrieved {reasoning.chunks_retrieved || 0} chunks
-                </div>
-                <div className="space-y-1">
-                  {reasoning.retrieval_summary?.map((chunk, i) => (
-                    <div key={i} className="flex items-center gap-2 text-xs flex-wrap">
-                      <span
-                        className={`px-1.5 py-0.5 rounded ${
-                          chunk.match_type === 'both'
-                            ? 'bg-green-200 text-green-800'
-                            : chunk.match_type === 'keyword'
-                            ? 'bg-yellow-200 text-yellow-800'
-                            : 'bg-blue-200 text-blue-800'
-                        }`}
-                      >
-                        {chunk.match_type}
-                      </span>
-                      <span className="text-gray-700">{chunk.source}</span>
-                      {chunk.keywords_found?.length > 0 && (
-                        <span className="text-gray-500">
-                          matched: {chunk.keywords_found.join(', ')}
+              {reasoning.retrieval_summary && reasoning.retrieval_summary.length > 0 && (
+                <div>
+                  <div className="flex items-center gap-1 font-medium text-purple-800 mb-1">
+                    <Zap className="w-4 h-4" />
+                    Retrieved {reasoning.chunks_retrieved || 0} chunks
+                  </div>
+                  <div className="space-y-1">
+                    {reasoning.retrieval_summary.map((chunk, i) => (
+                      <div key={i} className="flex items-center gap-2 text-xs flex-wrap">
+                        <span
+                          className={`px-1.5 py-0.5 rounded ${
+                            chunk.match_type === 'both'
+                              ? 'bg-green-200 text-green-800'
+                              : chunk.match_type === 'keyword'
+                              ? 'bg-yellow-200 text-yellow-800'
+                              : 'bg-blue-200 text-blue-800'
+                          }`}
+                        >
+                          {chunk.match_type}
                         </span>
-                      )}
-                      <span className="text-gray-400 ml-auto">
-                        score: {chunk.scores?.combined?.toFixed(2) || 'N/A'}
-                      </span>
-                    </div>
-                  ))}
+                        <span className="text-gray-700">{chunk.source}</span>
+                        {chunk.keywords_found?.length > 0 && (
+                          <span className="text-gray-500">
+                            matched: {chunk.keywords_found.join(', ')}
+                          </span>
+                        )}
+                        <span className="text-gray-400 ml-auto">
+                          score: {chunk.scores?.combined?.toFixed(2) || 'N/A'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
             </>
           )}
 

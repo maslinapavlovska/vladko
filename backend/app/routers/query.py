@@ -6,8 +6,11 @@ from app.config import settings
 from app.services.vector_store import vector_store
 from app.services.llm_service import (
     generate_answer,
+    generate_deterministic_mcq_answer,
     analyze_mcq_question,
-    reason_over_evidence,
+    search_web_for_answer,
+    parse_llm_response,
+    validate_answer_against_evidence,
 )
 
 router = APIRouter()
@@ -16,6 +19,7 @@ router = APIRouter()
 class QueryRequest(BaseModel):
     question: str
     top_k: int = 5
+    enable_web_fallback: bool = True  # NEW: Allow web search if not found
 
 
 class Citation(BaseModel):
@@ -35,14 +39,12 @@ class RetrievalSummary(BaseModel):
 
 
 class Stage1Analysis(BaseModel):
-    """Stage 1: LLM query analysis results."""
     search_terms: list[str]
     reasoning: str
     raw_response: Optional[str] = None
 
 
 class GrepResult(BaseModel):
-    """Stage 2: Grep search result with context."""
     term: str
     filename: str
     page: int
@@ -52,17 +54,41 @@ class GrepResult(BaseModel):
     full_excerpt: str
 
 
+class OptionValidation(BaseModel):
+    """NEW: Shows which options were found in documents."""
+    option: str
+    found_in_documents: bool
+    evidence_count: int
+    sources: list[str]
+
+
+class AnswerJustification(BaseModel):
+    """NEW: Structured justification for the answer."""
+    answer: Optional[str]
+    confidence: str  # HIGH, LOW, NONE
+    evidence_quote: Optional[str]
+    source: Optional[str]
+    explanation: str
+    validated: bool
+    validation_note: str
+
+
 class Reasoning(BaseModel):
-    # Original fields (for non-MCQ questions)
+    # Original fields
     keywords_extracted: list[str] = []
     chunks_retrieved: int = 0
     retrieval_summary: list[RetrievalSummary] = []
     prompt_sent: str = ""
     is_mcq: bool = False
     mcq_options: list[str] = []
-    # New two-stage MCQ fields
+    # Two-stage MCQ fields
     stage1_analysis: Optional[Stage1Analysis] = None
     stage2_grep_results: Optional[list[GrepResult]] = None
+    # NEW: Validation and justification fields
+    options_validation: Optional[list[OptionValidation]] = None
+    justification: Optional[AnswerJustification] = None
+    used_web_search: bool = False
+    web_search_query: Optional[str] = None
 
 
 class QueryResponse(BaseModel):
@@ -73,7 +99,7 @@ class QueryResponse(BaseModel):
 
 @router.post("/query", response_model=QueryResponse)
 async def query_documents(request: QueryRequest):
-    """Query documents with hybrid search and reasoning transparency."""
+    """Query documents with hybrid search, deterministic MCQ handling, and justification."""
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
 
@@ -81,22 +107,38 @@ async def query_documents(request: QueryRequest):
     is_mcq, mcq_options = vector_store._detect_mcq_options(request.question)
 
     if is_mcq and mcq_options:
-        # ===== TWO-STAGE MCQ PIPELINE =====
-        return await _handle_mcq_query(request.question, mcq_options)
+        return await _handle_mcq_query_deterministic(
+            request.question, 
+            mcq_options,
+            enable_web_fallback=request.enable_web_fallback
+        )
     else:
-        # ===== STANDARD HYBRID SEARCH PIPELINE =====
         return await _handle_standard_query(request)
 
 
-async def _handle_mcq_query(question: str, mcq_options: list[str]) -> QueryResponse:
-    """Handle MCQ questions with two-stage LLM pipeline."""
-
-    # Stage 1: LLM analyzes question to determine search terms
+async def _handle_mcq_query_deterministic(
+    question: str, 
+    mcq_options: list[str],
+    enable_web_fallback: bool = True
+) -> QueryResponse:
+    """
+    NEW: Deterministic MCQ handling that prevents hallucination.
+    
+    Pipeline:
+    1. Search documents for ALL options (grep search)
+    2. Validate which options actually appear in text (deterministic)
+    3. If exactly 1 found → that's the answer
+    4. If 0 found → web search fallback (optional)
+    5. If multiple found → ask LLM to choose from ONLY found options
+    6. Validate LLM response matches what we found
+    7. Return with full justification
+    """
+    
+    # Stage 1: Get search terms (options + related terms)
     try:
         analysis = await analyze_mcq_question(question, mcq_options)
         search_terms = analysis.get("search_terms", mcq_options)
     except Exception as e:
-        # Fallback: use options as search terms
         analysis = {
             "search_terms": mcq_options,
             "reasoning": f"Fallback due to error: {str(e)}",
@@ -105,32 +147,132 @@ async def _handle_mcq_query(question: str, mcq_options: list[str]) -> QueryRespo
 
     # Stage 2: Grep search with context
     grep_results = vector_store.grep_search(search_terms, context_lines=3)
+    
+    # Stage 3: CRITICAL - Deterministically validate which options appear in documents
+    # Also search in ALL documents, not just grep results
+    found_options = {}
+    for option in mcq_options:
+        # Check in grep results
+        option_lower = option.lower().strip()
+        option_evidence = []
+        
+        for result in grep_results:
+            excerpt_lower = result.get("full_excerpt", "").lower()
+            if option_lower in excerpt_lower:
+                option_evidence.append({
+                    "filename": result["filename"],
+                    "page": result["page"],
+                    "excerpt": result["full_excerpt"],
+                    "match_line": result["match_line"],
+                })
+        
+        # Also do a comprehensive search across ALL documents
+        all_doc_matches = vector_store.find_option_in_all_documents(option)
+        for match in all_doc_matches:
+            # Avoid duplicates
+            is_duplicate = any(
+                ev["filename"] == match["filename"] and ev["page"] == match["page"]
+                for ev in option_evidence
+            )
+            if not is_duplicate:
+                option_evidence.append({
+                    "filename": match["filename"],
+                    "page": match["page"],
+                    "excerpt": match["context"],
+                    "match_line": match["match_line"],
+                })
+        
+        if option_evidence:
+            found_options[option] = option_evidence
 
-    # Stage 3: LLM reasons over evidence
+    # Build options validation for transparency
+    options_validation = [
+        OptionValidation(
+            option=opt,
+            found_in_documents=opt in found_options,
+            evidence_count=len(found_options.get(opt, [])),
+            sources=[
+                f"{ev['filename']} p.{ev['page']}" 
+                for ev in found_options.get(opt, [])[:3]
+            ]
+        )
+        for opt in mcq_options
+    ]
+
+    # Stage 4: Determine answer based on what we found
+    web_results = None
+    used_web_search = False
+    
+    if len(found_options) == 0 and enable_web_fallback:
+        # No options found - try web search
+        web_results_data = await search_web_for_answer(question, mcq_options)
+        if web_results_data:
+            web_results = web_results_data.get("summary", "")
+            used_web_search = True
+    
+    # Stage 5: Generate answer using deterministic prompt
     try:
-        answer, prompt_sent = await reason_over_evidence(question, mcq_options, grep_results)
+        answer, prompt_sent = await generate_deterministic_mcq_answer(
+            question=question,
+            options=mcq_options,
+            found_options=found_options,
+            web_results=web_results
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate answer: {str(e)}")
 
-    # Format citations from grep results
+    # Stage 6: Parse and validate LLM response
+    parsed = parse_llm_response(answer)
+    validated = validate_answer_against_evidence(parsed, found_options)
+    
+    # Build justification
+    justification = AnswerJustification(
+        answer=validated.get("answer"),
+        confidence=validated.get("confidence", "UNKNOWN"),
+        evidence_quote=validated.get("evidence"),
+        source=validated.get("source"),
+        explanation=validated.get("justification", ""),
+        validated=validated.get("validated", False),
+        validation_note=validated.get("validation_note", ""),
+    )
+
+    # If validation failed (LLM hallucinated), override with correct answer
+    if not validated.get("validated", False) and len(found_options) == 1:
+        correct_option = list(found_options.keys())[0]
+        evidence = found_options[correct_option][0]
+        
+        # Override the hallucinated answer
+        answer = f"""Answer: {correct_option}
+Confidence: HIGH (deterministically verified)
+Evidence: "{evidence['match_line']}"
+Source: {evidence['filename']}, page {evidence['page']}
+Justification: This option was the ONLY one found in the uploaded documents. The system verified this deterministically.
+
+⚠️ Note: The LLM initially selected a different answer, but validation showed only "{correct_option}" appears in your documents."""
+        
+        justification.answer = correct_option
+        justification.confidence = "HIGH"
+        justification.evidence_quote = evidence["match_line"]
+        justification.source = f"{evidence['filename']}, page {evidence['page']}"
+        justification.validated = True
+        justification.validation_note = f"Auto-corrected from LLM hallucination to verified answer: {correct_option}"
+
+    # Format citations from found options
     citations = []
-    seen = set()  # Avoid duplicate citations
-    for result in grep_results[:10]:  # Limit citations
-        key = (result["filename"], result["page"], result["term"])
-        if key not in seen:
-            seen.add(key)
+    for opt, evidences in found_options.items():
+        for ev in evidences[:2]:  # Limit citations per option
             citations.append(
                 Citation(
-                    filename=result["filename"],
-                    page=result["page"],
-                    excerpt=result["full_excerpt"][:300] + "..." if len(result["full_excerpt"]) > 300 else result["full_excerpt"],
-                    match_type="grep",
-                    keyword_matches=[result["term"]],
-                    scores={"grep_match": 1.0, "keyword": 0.0, "semantic": 0.0},
+                    filename=ev["filename"],
+                    page=ev["page"],
+                    excerpt=ev["excerpt"][:300] + "..." if len(ev["excerpt"]) > 300 else ev["excerpt"],
+                    match_type="verified",
+                    keyword_matches=[opt],
+                    scores={"verified_match": 1.0},
                 )
             )
 
-    # Build reasoning with two-stage info
+    # Build reasoning with full transparency
     reasoning = Reasoning(
         is_mcq=True,
         mcq_options=mcq_options,
@@ -150,8 +292,11 @@ async def _handle_mcq_query(question: str, mcq_options: list[str]) -> QueryRespo
                 context_after=r["context_after"],
                 full_excerpt=r["full_excerpt"],
             )
-            for r in grep_results[:15]  # Limit for response size
+            for r in grep_results[:15]
         ],
+        options_validation=options_validation,
+        justification=justification,
+        used_web_search=used_web_search,
     )
 
     return QueryResponse(answer=answer, citations=citations, reasoning=reasoning)
@@ -160,9 +305,10 @@ async def _handle_mcq_query(question: str, mcq_options: list[str]) -> QueryRespo
 async def _handle_standard_query(request: QueryRequest) -> QueryResponse:
     """Handle non-MCQ questions with standard hybrid search."""
 
-    # Search for relevant chunks (hybrid search)
     try:
-        results, keywords, search_info = await vector_store.search(request.question, top_k=request.top_k)
+        results, keywords, search_info = await vector_store.search(
+            request.question, top_k=request.top_k
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
@@ -179,13 +325,11 @@ async def _handle_standard_query(request: QueryRequest) -> QueryResponse:
             ),
         )
 
-    # Generate answer with LLM
     try:
         answer, prompt_sent = await generate_answer(request.question, results)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate answer: {str(e)}")
 
-    # Format citations with match info
     citations = [
         Citation(
             filename=result["filename"],
@@ -198,7 +342,6 @@ async def _handle_standard_query(request: QueryRequest) -> QueryResponse:
         for result in results
     ]
 
-    # Build retrieval summary for reasoning
     retrieval_summary = [
         RetrievalSummary(
             source=f"{result['filename']} стр.{result['page']}",
@@ -209,7 +352,6 @@ async def _handle_standard_query(request: QueryRequest) -> QueryResponse:
         for result in results
     ]
 
-    # Build reasoning object
     reasoning = Reasoning(
         keywords_extracted=keywords,
         chunks_retrieved=len(results),
@@ -224,13 +366,11 @@ async def _handle_standard_query(request: QueryRequest) -> QueryResponse:
 @router.delete("/reset")
 async def reset_database():
     """Clear all documents and vectors."""
-    # Clear vector store
     try:
         vector_store.reset()
     except Exception:
         pass
 
-    # Clear uploads directory
     for file_path in settings.upload_dir.glob("*.pdf"):
         file_path.unlink(missing_ok=True)
 

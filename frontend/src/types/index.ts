@@ -8,13 +8,14 @@ export interface Scores {
   keyword?: number;
   semantic?: number;
   grep_match?: number;
+  verified_match?: number;
 }
 
 export interface Citation {
   filename: string;
   page: number;
   excerpt: string;
-  match_type: 'keyword' | 'semantic' | 'both' | 'grep';
+  match_type: 'keyword' | 'semantic' | 'both' | 'grep' | 'verified';
   keyword_matches: string[];
   scores: Scores;
 }
@@ -43,6 +44,25 @@ export interface GrepResult {
   full_excerpt: string;
 }
 
+// NEW: Option validation - shows which options were found
+export interface OptionValidation {
+  option: string;
+  found_in_documents: boolean;
+  evidence_count: number;
+  sources: string[];
+}
+
+// NEW: Structured justification for answers
+export interface AnswerJustification {
+  answer: string | null;
+  confidence: 'HIGH' | 'LOW' | 'NONE' | 'UNKNOWN';
+  evidence_quote: string | null;
+  source: string | null;
+  explanation: string;
+  validated: boolean;
+  validation_note: string;
+}
+
 export interface Reasoning {
   // Original fields (for non-MCQ)
   keywords_extracted?: string[];
@@ -54,6 +74,11 @@ export interface Reasoning {
   // Two-stage MCQ fields
   stage1_analysis?: Stage1Analysis;
   stage2_grep_results?: GrepResult[];
+  // NEW: Validation and justification
+  options_validation?: OptionValidation[];
+  justification?: AnswerJustification;
+  used_web_search?: boolean;
+  web_search_query?: string;
 }
 
 export interface Message {
@@ -67,6 +92,7 @@ export interface Message {
 export interface QueryRequest {
   question: string;
   top_k?: number;
+  enable_web_fallback?: boolean;
 }
 
 export interface QueryResponse {
