@@ -11,6 +11,8 @@ from app.services.llm_service import (
     search_web_for_answer,
     parse_llm_response,
     validate_answer_against_evidence,
+    extract_quotes,
+    verify_quotes_in_context,
 )
 
 router = APIRouter()
@@ -73,6 +75,23 @@ class AnswerJustification(BaseModel):
     validation_note: str
 
 
+class QuoteVerification(BaseModel):
+    """Verification result for a quoted citation in open questions."""
+    quote: str
+    verified: bool
+    match_ratio: float
+    match_type: str  # exact, fuzzy, none
+    source: Optional[dict] = None
+
+
+class CitationVerificationResult(BaseModel):
+    """Overall citation verification summary for open questions."""
+    quotes_found: int
+    quotes_verified: int
+    all_verified: bool
+    verifications: list[QuoteVerification]
+
+
 class Reasoning(BaseModel):
     # Original fields
     keywords_extracted: list[str] = []
@@ -84,11 +103,13 @@ class Reasoning(BaseModel):
     # Two-stage MCQ fields
     stage1_analysis: Optional[Stage1Analysis] = None
     stage2_grep_results: Optional[list[GrepResult]] = None
-    # NEW: Validation and justification fields
+    # Validation and justification fields
     options_validation: Optional[list[OptionValidation]] = None
     justification: Optional[AnswerJustification] = None
     used_web_search: bool = False
     web_search_query: Optional[str] = None
+    # Citation verification for open questions
+    citation_verification: Optional[CitationVerificationResult] = None
 
 
 class QueryResponse(BaseModel):
@@ -330,6 +351,40 @@ async def _handle_standard_query(request: QueryRequest) -> QueryResponse:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate answer: {str(e)}")
 
+    # Citation verification: extract quotes and verify against source chunks
+    quotes = extract_quotes(answer)
+    citation_verification = None
+
+    if quotes:
+        verifications = verify_quotes_in_context(quotes, results)
+        verified_count = sum(1 for v in verifications if v["verified"])
+
+        citation_verification = CitationVerificationResult(
+            quotes_found=len(quotes),
+            quotes_verified=verified_count,
+            all_verified=(verified_count == len(quotes)),
+            verifications=[
+                QuoteVerification(
+                    quote=v["quote"],
+                    verified=v["verified"],
+                    match_ratio=v["match_ratio"],
+                    match_type=v["match_type"],
+                    source=v["source"]
+                )
+                for v in verifications
+            ]
+        )
+
+        # Add warning if any quotes couldn't be verified
+        unverified = [v for v in verifications if not v["verified"]]
+        if unverified:
+            warning = "\n\n⚠️ Внимание / Warning: "
+            if len(unverified) == len(quotes):
+                warning += "Цитираният текст не беше намерен в документите. / The cited text could not be verified in the documents."
+            else:
+                warning += f"{len(unverified)} от {len(quotes)} цитата не бяха потвърдени. / {len(unverified)} of {len(quotes)} citations could not be verified."
+            answer += warning
+
     citations = [
         Citation(
             filename=result["filename"],
@@ -358,6 +413,7 @@ async def _handle_standard_query(request: QueryRequest) -> QueryResponse:
         retrieval_summary=retrieval_summary,
         prompt_sent=prompt_sent,
         is_mcq=False,
+        citation_verification=citation_verification,
     )
 
     return QueryResponse(answer=answer, citations=citations, reasoning=reasoning)

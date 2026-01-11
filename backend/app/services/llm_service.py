@@ -1,5 +1,6 @@
 import json
 import re
+from difflib import SequenceMatcher
 from typing import Optional
 
 import httpx
@@ -414,7 +415,7 @@ async def reason_over_evidence(
     """Legacy function - now redirects to deterministic approach."""
     # This is kept for backwards compatibility but should use the new approach
     from app.services.vector_store import vector_store
-    
+
     found_options = vector_store.validate_options_in_text(options, grep_results)
     return await generate_deterministic_mcq_answer(
         question=question,
@@ -422,3 +423,141 @@ async def reason_over_evidence(
         found_options=found_options,
         web_results=None
     )
+
+
+# ============================================================================
+# Citation Verification for Open Questions
+# ============================================================================
+
+def extract_quotes(text: str) -> list[str]:
+    """
+    Extract quoted text from LLM response.
+    Handles various quote styles: "...", «...», '...', and Evidence: fields.
+    """
+    quotes = []
+
+    # Pattern for double quotes (ASCII and Unicode variants)
+    double_quote_patterns = [
+        r'"([^"]{10,})"',           # ASCII double quotes
+        r'"([^"]{10,})"',           # Unicode curly quotes
+        r'„([^"]{10,})"',           # German/Bulgarian style quotes
+        r'«([^»]{10,})»',           # Guillemets (French/Bulgarian)
+    ]
+
+    for pattern in double_quote_patterns:
+        matches = re.findall(pattern, text)
+        quotes.extend(matches)
+
+    # Also extract text after "Evidence:" marker if present
+    evidence_match = re.search(
+        r'Evidence:\s*["\']?(.+?)["\']?(?=\n|Source:|$)',
+        text,
+        re.IGNORECASE | re.DOTALL
+    )
+    if evidence_match:
+        evidence_text = evidence_match.group(1).strip()
+        # Only add if it's substantial and not already captured
+        if len(evidence_text) >= 10 and evidence_text not in quotes:
+            quotes.append(evidence_text)
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_quotes = []
+    for q in quotes:
+        q_clean = q.strip()
+        if q_clean not in seen and len(q_clean) >= 10:
+            seen.add(q_clean)
+            unique_quotes.append(q_clean)
+
+    return unique_quotes
+
+
+def verify_quote_in_text(quote: str, source_text: str, threshold: float = 0.7) -> dict:
+    """
+    Check if a quote exists in the source text using fuzzy matching.
+
+    Returns dict with:
+    - verified: bool
+    - match_ratio: float (0-1)
+    - best_match: str (the closest matching substring found)
+    """
+    quote_lower = quote.lower().strip()
+    source_lower = source_text.lower()
+
+    # First try exact substring match
+    if quote_lower in source_lower:
+        return {
+            "verified": True,
+            "match_ratio": 1.0,
+            "best_match": quote,
+            "match_type": "exact"
+        }
+
+    # Try fuzzy matching with sliding window
+    quote_len = len(quote_lower)
+    best_ratio = 0.0
+    best_match = ""
+
+    # Slide a window of similar size through the source
+    window_sizes = [quote_len, int(quote_len * 0.8), int(quote_len * 1.2)]
+
+    for window_size in window_sizes:
+        if window_size > len(source_lower):
+            continue
+
+        for i in range(0, len(source_lower) - window_size + 1, max(1, window_size // 4)):
+            window = source_lower[i:i + window_size]
+            ratio = SequenceMatcher(None, quote_lower, window).ratio()
+
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_match = source_text[i:i + window_size]
+
+    return {
+        "verified": best_ratio >= threshold,
+        "match_ratio": round(best_ratio, 3),
+        "best_match": best_match if best_ratio >= threshold else "",
+        "match_type": "fuzzy" if best_ratio >= threshold else "none"
+    }
+
+
+def verify_quotes_in_context(
+    quotes: list[str],
+    context_chunks: list[dict],
+    threshold: float = 0.7
+) -> list[dict]:
+    """
+    Verify all extracted quotes against the retrieved context chunks.
+
+    Returns list of verification results, one per quote.
+    """
+    results = []
+
+    # Combine all chunk text for searching
+    all_text = "\n".join(chunk.get("text", "") for chunk in context_chunks)
+
+    for quote in quotes:
+        # Try to verify against combined text first
+        verification = verify_quote_in_text(quote, all_text, threshold)
+
+        # If verified, try to find which specific chunk it came from
+        source_chunk = None
+        if verification["verified"]:
+            for chunk in context_chunks:
+                chunk_text = chunk.get("text", "")
+                if verify_quote_in_text(quote, chunk_text, threshold)["verified"]:
+                    source_chunk = {
+                        "filename": chunk.get("filename", "Unknown"),
+                        "page": chunk.get("page", 0)
+                    }
+                    break
+
+        results.append({
+            "quote": quote[:100] + "..." if len(quote) > 100 else quote,
+            "verified": verification["verified"],
+            "match_ratio": verification["match_ratio"],
+            "match_type": verification["match_type"],
+            "source": source_chunk
+        })
+
+    return results
