@@ -1,0 +1,43 @@
+[env]
+PYTHONUNBUFFERED = "1"
+OLLAMA_HOST = "http://192.168.0.12:11434"
+
+[settings]
+cache = false
+
+# Install dependencies
+[tasks.install]
+desc = "Install all dependencies"
+depends = ["backend-install", "frontend-install"]
+run = []
+
+[tasks.backend-install]
+desc = "Install Python dependencies"
+run = ["bash", "-c", "source venv/bin/activate && pip install -q -r requirements.txt"]
+cwd = "./backend"
+
+[tasks.frontend-install]
+desc = "Install Node dependencies"
+run = ["npm", "install", "--silent"]
+cwd = "./frontend"
+
+# Individual services
+[tasks.backend]
+desc = "Run Python backend (uvicorn)"
+shell = true
+run = ["source venv/bin/activate && uvicorn app.main:app --reload --host 0.0.0.0 --port 8000"]
+cwd = "./backend"
+no_cache = true
+
+[tasks.frontend]
+desc = "Run Node.js frontend (vite)"
+run = ["npm", "run", "dev"]
+cwd = "./frontend"
+no_cache = true
+
+# Development - run both together
+[tasks.dev]
+desc = "Start backend + frontend together"
+shell = true
+run = ["(cd backend && source venv/bin/activate && uvicorn app.main:app --reload --host 0.0.0.0 --port 8000) & (cd frontend && npm run dev) & wait"]
+no_cache = true
