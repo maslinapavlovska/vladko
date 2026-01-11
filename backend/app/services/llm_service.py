@@ -12,6 +12,15 @@ from app.config import settings
 # ============================================================================
 DETERMINISTIC_MCQ_PROMPT = """You are answering a multiple choice question. I have ALREADY searched the documents for you.
 
+CRITICAL: The question is in BULGARIAN. Read it VERY CAREFULLY, paying special attention to:
+- "бедна" = POOR/LACKING (NOT rich)
+- "богата" = RICH/ABUNDANT
+- "не" = NOT (negation)
+- "без" = WITHOUT
+- "малко" = FEW/LITTLE
+- "много" = MANY/MUCH
+Do NOT confuse opposites! Re-read the question before answering.
+
 QUESTION:
 {question}
 
@@ -31,7 +40,7 @@ Answer: [Your answer - either a letter+option OR "НЕ МОГА ДА ОПРЕД�
 Confidence: [HIGH if option found in documents, LOW if using web search, NONE if no answer]
 Evidence: "[Exact quote from the source that supports your answer]"
 Source: [filename, page X] OR [Web search]
-Justification: [2-3 sentences explaining WHY this is the correct answer based on the evidence]
+Justification: [2-3 sentences explaining WHY this is the correct answer. ACCURATELY describe what the question asks - if it says "бедна" (poor), say "poor", NOT "rich"]
 """
 
 TASK_FOUND_ONE = """Based on my search, ONLY "{found_option}" was found in the documents.
