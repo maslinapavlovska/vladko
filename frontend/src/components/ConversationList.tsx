@@ -190,7 +190,7 @@ export function ConversationList({
                           </div>
                         )}
                       </div>
-                      <div className="hidden group-hover:flex items-center gap-1">
+                      <div className="flex items-center gap-1">
                         <button
                           onClick={e => {
                             e.stopPropagation();
