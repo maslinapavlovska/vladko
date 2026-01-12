@@ -131,3 +131,28 @@ export interface UploadResponse {
   pages: number;
   chunks: number;
 }
+
+// Streaming types
+export type PipelineStage =
+  | 'detecting'
+  | 'analyzing'
+  | 'searching'
+  | 'validating'
+  | 'generating'
+  | 'complete';
+
+export interface StreamStatus {
+  stage: PipelineStage;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export interface StreamState {
+  status: StreamStatus | null;
+  partialAnswer: string;
+  citations: Citation[] | null;
+  reasoning: Reasoning | null;
+  optionsValidation: OptionValidation[] | null;
+  isStreaming: boolean;
+  error: string | null;
+}

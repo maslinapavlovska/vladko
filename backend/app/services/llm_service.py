@@ -1,7 +1,7 @@
 import json
 import re
 from difflib import SequenceMatcher
-from typing import Optional
+from typing import Optional, AsyncGenerator, Union
 
 import httpx
 
@@ -259,6 +259,45 @@ async def generate_answer(
         return data["response"], prompt
 
 
+async def generate_answer_stream(
+    question: str,
+    context_chunks: list[dict],
+    conversation_history: list[dict] = None
+) -> AsyncGenerator[Union[str, dict], None]:
+    """Generate an answer with streaming tokens."""
+    prompt = build_prompt(question, context_chunks, conversation_history)
+
+    # Yield prompt first for logging
+    yield {"prompt": prompt}
+
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        async with client.stream(
+            "POST",
+            f"{settings.ollama_host}/api/generate",
+            json={
+                "model": settings.chat_model,
+                "prompt": prompt,
+                "stream": True,
+                "options": {
+                    "temperature": 0.3,
+                },
+            },
+        ) as response:
+            response.raise_for_status()
+
+            async for line in response.aiter_lines():
+                if line:
+                    try:
+                        data = json.loads(line)
+                        token = data.get("response", "")
+                        if token:
+                            yield token
+                        if data.get("done", False):
+                            break
+                    except json.JSONDecodeError:
+                        continue
+
+
 async def generate_deterministic_mcq_answer(
     question: str,
     options: list[str],
@@ -275,7 +314,7 @@ async def generate_deterministic_mcq_answer(
         found_options=found_options,
         web_results=web_results
     )
-    
+
     async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(
             f"{settings.ollama_host}/api/generate",
@@ -291,6 +330,54 @@ async def generate_deterministic_mcq_answer(
         response.raise_for_status()
         data = response.json()
         return data["response"], prompt
+
+
+async def generate_deterministic_mcq_answer_stream(
+    question: str,
+    options: list[str],
+    found_options: dict[str, list[dict]],
+    web_results: Optional[str] = None
+) -> AsyncGenerator[Union[str, dict], None]:
+    """
+    Generate MCQ answer with streaming tokens.
+    The LLM is TOLD what was found, not asked to find it.
+    """
+    prompt = build_deterministic_mcq_prompt(
+        question=question,
+        options=options,
+        found_options=found_options,
+        web_results=web_results
+    )
+
+    # Yield prompt first for logging
+    yield {"prompt": prompt}
+
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        async with client.stream(
+            "POST",
+            f"{settings.ollama_host}/api/generate",
+            json={
+                "model": settings.chat_model,
+                "prompt": prompt,
+                "stream": True,
+                "options": {
+                    "temperature": 0.1,
+                },
+            },
+        ) as response:
+            response.raise_for_status()
+
+            async for line in response.aiter_lines():
+                if line:
+                    try:
+                        data = json.loads(line)
+                        token = data.get("response", "")
+                        if token:
+                            yield token
+                        if data.get("done", False):
+                            break
+                    except json.JSONDecodeError:
+                        continue
 
 
 async def search_web_for_answer(question: str, options: list[str]) -> Optional[dict]:
