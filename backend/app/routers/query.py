@@ -129,11 +129,74 @@ class QueryResponse(BaseModel):
     message_id: Optional[str] = None  # ID of saved assistant message
 
 
+def detect_chitchat(text: str) -> tuple[bool, str]:
+    """Detect if the input is chitchat rather than a document question."""
+    text_lower = text.lower().strip()
+
+    # Greetings
+    greetings = ['hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening',
+                 'howdy', 'greetings', 'здравей', 'здрасти', 'привет', 'добър ден',
+                 'добро утро', 'добър вечер']
+    for g in greetings:
+        if text_lower == g or text_lower.startswith(g + ' ') or text_lower.startswith(g + ','):
+            return True, "Hello! I'm here to help you find information in your uploaded documents. Feel free to ask me any question about them. / Здравейте! Тук съм, за да ви помогна да намерите информация в качените документи. Задайте ми въпрос за тях."
+
+    # Thanks
+    thanks = ['thanks', 'thank you', 'thx', 'ty', 'благодаря', 'мерси']
+    for t in thanks:
+        if t in text_lower:
+            return True, "You're welcome! Let me know if you have any other questions about your documents. / Няма защо! Кажете ми ако имате други въпроси за документите."
+
+    # Goodbye
+    goodbye = ['bye', 'goodbye', 'see you', 'later', 'довиждане', 'чао']
+    for g in goodbye:
+        if g in text_lower:
+            return True, "Goodbye! Feel free to come back anytime you need help with your documents. / Довиждане! Върнете се когато имате нужда от помощ с документите."
+
+    # How are you
+    if any(phrase in text_lower for phrase in ['how are you', 'how r u', 'whats up', "what's up", 'как си', 'какво правиш']):
+        return True, "I'm doing well, thank you for asking! I'm ready to help you find information in your documents. What would you like to know? / Добре съм, благодаря! Готов съм да ви помогна да намерите информация в документите. Какво бихте искали да научите?"
+
+    # What can you do
+    if any(phrase in text_lower for phrase in ['what can you do', 'help me', 'what do you do', 'какво можеш', 'какво правиш']):
+        return True, "I can help you find information in your uploaded PDF documents. Just ask me a question about their content, and I'll search through them to find the answer! For multiple choice questions, I'll verify which options actually appear in the documents. / Мога да ви помогна да намерите информация в качените PDF документи. Просто ме попитайте нещо за съдържанието им и аз ще потърся отговора!"
+
+    return False, ""
+
+
 @router.post("/query", response_model=QueryResponse)
 async def query_documents(request: QueryRequest):
     """Query documents with hybrid search, deterministic MCQ handling, and conversation support."""
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
+
+    # Check for chitchat first
+    is_chitchat, chitchat_response = detect_chitchat(request.question)
+    if is_chitchat:
+        # Save messages to conversation if provided
+        if request.conversation_id:
+            conversation_service.add_message(
+                conversation_id=request.conversation_id,
+                role="user",
+                content=request.question
+            )
+            msg = conversation_service.add_message(
+                conversation_id=request.conversation_id,
+                role="assistant",
+                content=chitchat_response
+            )
+            return QueryResponse(
+                answer=chitchat_response,
+                citations=[],
+                reasoning=Reasoning(prompt_sent="[Chitchat detected - no search performed]"),
+                conversation_id=request.conversation_id,
+                message_id=msg["id"]
+            )
+        return QueryResponse(
+            answer=chitchat_response,
+            citations=[],
+            reasoning=Reasoning(prompt_sent="[Chitchat detected - no search performed]")
+        )
 
     # Load conversation history if provided
     conversation_history = []
@@ -516,6 +579,37 @@ async def query_documents_stream(request: QueryRequest):
 
     async def event_generator() -> AsyncGenerator[str, None]:
         try:
+            # Check for chitchat first
+            is_chitchat, chitchat_response = detect_chitchat(request.question)
+            if is_chitchat:
+                # Save messages to conversation if provided
+                if request.conversation_id:
+                    conversation_service.add_message(
+                        conversation_id=request.conversation_id,
+                        role="user",
+                        content=request.question
+                    )
+                    conversation_service.add_message(
+                        conversation_id=request.conversation_id,
+                        role="assistant",
+                        content=chitchat_response
+                    )
+
+                # Stream the chitchat response
+                yield sse_event("status", {
+                    "stage": PipelineStage.COMPLETE.value,
+                    "message": "Responding..."
+                })
+                yield sse_event("token", {"content": chitchat_response})
+                yield sse_event("reasoning", {
+                    "reasoning": {
+                        "is_mcq": False,
+                        "prompt_sent": "[Chitchat detected - no search performed]"
+                    }
+                })
+                yield sse_event("done", {"status": "complete"})
+                return
+
             # Load conversation history if provided
             conversation_history = []
             if request.conversation_id and request.include_history:
