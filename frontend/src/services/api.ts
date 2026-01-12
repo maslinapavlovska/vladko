@@ -1,5 +1,13 @@
 import axios from 'axios';
-import type { HealthStatus, QueryRequest, QueryResponse, UploadResponse } from '../types';
+import type {
+  HealthStatus,
+  QueryRequest,
+  QueryResponse,
+  UploadResponse,
+  Conversation,
+  ConversationDetail,
+  ConversationList,
+} from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
@@ -47,4 +55,39 @@ export async function queryDocuments(request: QueryRequest): Promise<QueryRespon
 
 export async function resetDatabase(): Promise<void> {
   await api.delete('/reset');
+}
+
+// ==================== Conversation API ====================
+
+export async function listConversations(page = 1, perPage = 20): Promise<ConversationList> {
+  const response = await api.get('/conversations', {
+    params: { page, per_page: perPage },
+  });
+  return response.data;
+}
+
+export async function createConversation(title?: string): Promise<Conversation> {
+  const response = await api.post('/conversations', title ? { title } : {});
+  return response.data;
+}
+
+export async function getConversation(id: string): Promise<ConversationDetail> {
+  const response = await api.get(`/conversations/${id}`);
+  return response.data;
+}
+
+export async function updateConversation(id: string, title: string): Promise<Conversation> {
+  const response = await api.patch(`/conversations/${id}`, { title });
+  return response.data;
+}
+
+export async function deleteConversation(id: string): Promise<void> {
+  await api.delete(`/conversations/${id}`);
+}
+
+export async function searchConversations(query: string, limit = 20): Promise<Conversation[]> {
+  const response = await api.get('/conversations/search', {
+    params: { q: query, limit },
+  });
+  return response.data;
 }

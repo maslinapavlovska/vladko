@@ -93,12 +93,37 @@ export interface QueryRequest {
   question: string;
   top_k?: number;
   enable_web_fallback?: boolean;
+  conversation_id?: string;
+  include_history?: boolean;
 }
 
 export interface QueryResponse {
   answer: string;
   citations: Citation[];
   reasoning: Reasoning;
+  conversation_id?: string;
+  message_id?: string;
+}
+
+// Conversation types
+export interface Conversation {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count?: number;
+  preview?: string;
+}
+
+export interface ConversationDetail extends Conversation {
+  messages: Message[];
+}
+
+export interface ConversationList {
+  conversations: Conversation[];
+  total: number;
+  page: number;
+  per_page: number;
 }
 
 export interface UploadResponse {

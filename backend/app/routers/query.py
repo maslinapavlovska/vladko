@@ -14,6 +14,7 @@ from app.services.llm_service import (
     extract_quotes,
     verify_quotes_in_context,
 )
+from app.services.conversation_service import conversation_service
 
 router = APIRouter()
 
@@ -21,7 +22,9 @@ router = APIRouter()
 class QueryRequest(BaseModel):
     question: str
     top_k: int = 5
-    enable_web_fallback: bool = True  # NEW: Allow web search if not found
+    enable_web_fallback: bool = True  # Allow web search if not found
+    conversation_id: Optional[str] = None  # Optional: save to conversation
+    include_history: bool = True  # Include conversation history in prompt
 
 
 class Citation(BaseModel):
@@ -116,31 +119,74 @@ class QueryResponse(BaseModel):
     answer: str
     citations: list[Citation]
     reasoning: Reasoning
+    conversation_id: Optional[str] = None  # If saved to conversation
+    message_id: Optional[str] = None  # ID of saved assistant message
 
 
 @router.post("/query", response_model=QueryResponse)
 async def query_documents(request: QueryRequest):
-    """Query documents with hybrid search, deterministic MCQ handling, and justification."""
+    """Query documents with hybrid search, deterministic MCQ handling, and conversation support."""
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
+
+    # Load conversation history if provided
+    conversation_history = []
+    if request.conversation_id and request.include_history:
+        conversation_history = conversation_service.get_recent_messages(
+            request.conversation_id, max_turns=5
+        )
+
+    # Save user message to conversation
+    if request.conversation_id:
+        conversation_service.add_message(
+            conversation_id=request.conversation_id,
+            role="user",
+            content=request.question
+        )
+        # Update title if this is the first message
+        conv = conversation_service.get_conversation(request.conversation_id)
+        if conv and len(conv.get("messages", [])) == 1:
+            conversation_service.update_conversation_title_from_message(
+                request.conversation_id, request.question
+            )
 
     # Detect if this is an MCQ question
     is_mcq, mcq_options = vector_store._detect_mcq_options(request.question)
 
     if is_mcq and mcq_options:
-        return await _handle_mcq_query_deterministic(
-            request.question, 
+        response = await _handle_mcq_query_deterministic(
+            request.question,
             mcq_options,
-            enable_web_fallback=request.enable_web_fallback
+            enable_web_fallback=request.enable_web_fallback,
+            conversation_history=conversation_history
         )
     else:
-        return await _handle_standard_query(request)
+        response = await _handle_standard_query(request, conversation_history)
+
+    # Save assistant response to conversation
+    message_id = None
+    if request.conversation_id:
+        msg = conversation_service.add_message(
+            conversation_id=request.conversation_id,
+            role="assistant",
+            content=response.answer,
+            citations=[c.model_dump() for c in response.citations],
+            reasoning=response.reasoning.model_dump()
+        )
+        message_id = msg["id"]
+
+    # Add conversation info to response
+    response.conversation_id = request.conversation_id
+    response.message_id = message_id
+
+    return response
 
 
 async def _handle_mcq_query_deterministic(
-    question: str, 
+    question: str,
     mcq_options: list[str],
-    enable_web_fallback: bool = True
+    enable_web_fallback: bool = True,
+    conversation_history: list[dict] = None
 ) -> QueryResponse:
     """
     NEW: Deterministic MCQ handling that prevents hallucination.
@@ -323,7 +369,10 @@ Justification: This option was the ONLY one found in the uploaded documents. The
     return QueryResponse(answer=answer, citations=citations, reasoning=reasoning)
 
 
-async def _handle_standard_query(request: QueryRequest) -> QueryResponse:
+async def _handle_standard_query(
+    request: QueryRequest,
+    conversation_history: list[dict] = None
+) -> QueryResponse:
     """Handle non-MCQ questions with standard hybrid search."""
 
     try:
@@ -347,7 +396,11 @@ async def _handle_standard_query(request: QueryRequest) -> QueryResponse:
         )
 
     try:
-        answer, prompt_sent = await generate_answer(request.question, results)
+        answer, prompt_sent = await generate_answer(
+            request.question,
+            results,
+            conversation_history=conversation_history
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate answer: {str(e)}")
 

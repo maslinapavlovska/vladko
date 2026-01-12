@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     chunk_overlap: int = 200
 
     # Storage Paths
+    data_dir: Path = Path(__file__).parent.parent / "data"
     upload_dir: Path = Path(__file__).parent.parent / "data" / "uploads"
     chroma_dir: Path = Path(__file__).parent.parent / "data" / "chroma_db"
 

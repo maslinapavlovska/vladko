@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react';
 import type { Message } from '../types';
 import { queryDocuments } from '../services/api';
 
-export function useQuery() {
+export function useQuery(conversationId?: string | null) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -17,10 +17,14 @@ export function useQuery() {
     setIsLoading(true);
 
     try {
-      const response = await queryDocuments({ question });
+      const response = await queryDocuments({
+        question,
+        conversation_id: conversationId || undefined,
+        include_history: !!conversationId,
+      });
 
       const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
+        id: response.message_id || (Date.now() + 1).toString(),
         role: 'assistant',
         content: response.answer,
         citations: response.citations,
@@ -39,10 +43,14 @@ export function useQuery() {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [conversationId]);
 
   const clearMessages = useCallback(() => {
     setMessages([]);
+  }, []);
+
+  const setMessagesFromConversation = useCallback((msgs: Message[]) => {
+    setMessages(msgs);
   }, []);
 
   return {
@@ -50,5 +58,6 @@ export function useQuery() {
     isLoading,
     sendQuery,
     clearMessages,
+    setMessages: setMessagesFromConversation,
   };
 }

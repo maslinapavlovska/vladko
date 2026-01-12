@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import health, documents, query
+from app.routers import health, documents, query, conversations
 
 app = FastAPI(
     title="RAG Document Q&A API",
@@ -22,3 +22,4 @@ app.add_middleware(
 app.include_router(health.router, tags=["Health"])
 app.include_router(documents.router, prefix="/documents", tags=["Documents"])
 app.include_router(query.router, tags=["Query"])
+app.include_router(conversations.router, prefix="/conversations", tags=["Conversations"])

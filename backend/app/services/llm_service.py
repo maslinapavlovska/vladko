@@ -97,8 +97,36 @@ FOR OPEN QUESTIONS:
 If the context doesn't contain enough information, clearly state this."""
 
 
-def build_prompt(question: str, context_chunks: list[dict]) -> str:
-    """Build the prompt with context and question."""
+def format_conversation_history(messages: list[dict], max_chars: int = 2000) -> str:
+    """Format conversation history for inclusion in prompt."""
+    if not messages:
+        return ""
+
+    formatted = []
+    total_chars = 0
+
+    for msg in messages:
+        role = "User" if msg["role"] == "user" else "Assistant"
+        content = msg["content"]
+        # Truncate long responses
+        if len(content) > 500:
+            content = content[:500] + "..."
+
+        line = f"{role}: {content}"
+        if total_chars + len(line) > max_chars:
+            break
+        formatted.append(line)
+        total_chars += len(line)
+
+    return "\n".join(formatted)
+
+
+def build_prompt(
+    question: str,
+    context_chunks: list[dict],
+    conversation_history: list[dict] = None
+) -> str:
+    """Build the prompt with context, conversation history, and question."""
     context_parts = []
 
     for chunk in context_chunks:
@@ -108,6 +136,19 @@ def build_prompt(question: str, context_chunks: list[dict]) -> str:
 
     context = "\n\n---\n\n".join(context_parts)
 
+    # Include conversation history if provided
+    history_section = ""
+    if conversation_history:
+        history_text = format_conversation_history(conversation_history)
+        if history_text:
+            history_section = f"""
+Previous conversation:
+{history_text}
+
+---
+
+"""
+
     prompt = f"""{SYSTEM_PROMPT}
 
 Context from documents:
@@ -115,8 +156,8 @@ Context from documents:
 {context}
 
 ---
-
-Question: {question}
+{history_section}
+Current question: {question}
 
 Answer (remember to cite sources with document name and page number, and provide justification):"""
 
@@ -193,9 +234,13 @@ def build_deterministic_mcq_prompt(
     )
 
 
-async def generate_answer(question: str, context_chunks: list[dict]) -> tuple[str, str]:
+async def generate_answer(
+    question: str,
+    context_chunks: list[dict],
+    conversation_history: list[dict] = None
+) -> tuple[str, str]:
     """Generate an answer using Ollama LLM for non-MCQ questions."""
-    prompt = build_prompt(question, context_chunks)
+    prompt = build_prompt(question, context_chunks, conversation_history)
 
     async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(
