@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
 import { ChatArea } from './components/ChatArea';
@@ -56,9 +56,14 @@ function App() {
     resetStreamState();
   }, [activeConversation, setMessages, clearMessages, resetStreamState]);
 
+  // Track if we've already processed the completed stream
+  const hasProcessedCompletion = useRef(false);
+
   // When streaming completes, add the message to the list and refresh
   useEffect(() => {
-    if (!isStreaming && partialAnswer && streamStatus?.stage === 'complete') {
+    if (!isStreaming && partialAnswer && streamStatus?.stage === 'complete' && !hasProcessedCompletion.current) {
+      hasProcessedCompletion.current = true;
+
       // Create a new message from the streamed response
       const newMessage: Message = {
         id: Date.now().toString(),
@@ -69,7 +74,12 @@ function App() {
       };
 
       setMessages((prev: Message[]) => [...prev, newMessage]);
-      resetStreamState();
+
+      // Delay reset to allow smooth transition
+      setTimeout(() => {
+        resetStreamState();
+        hasProcessedCompletion.current = false;
+      }, 100);
 
       // Refresh conversations and active conversation
       loadConversations();
@@ -78,6 +88,13 @@ function App() {
       }
     }
   }, [isStreaming, partialAnswer, streamStatus, streamCitations, streamReasoning, setMessages, resetStreamState, loadConversations, loadConversation, activeConversation?.id]);
+
+  // Reset the completion flag when starting a new stream
+  useEffect(() => {
+    if (isStreaming) {
+      hasProcessedCompletion.current = false;
+    }
+  }, [isStreaming]);
 
   const handleReset = async () => {
     await reset();
