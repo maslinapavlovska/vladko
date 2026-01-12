@@ -2,11 +2,11 @@ import { useState, useCallback } from 'react';
 import type { Message } from '../types';
 import { queryDocuments } from '../services/api';
 
-export function useQuery(conversationId?: string | null) {
+export function useQuery() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
 
-  const sendQuery = useCallback(async (question: string) => {
+  const sendQuery = useCallback(async (question: string, conversationId?: string) => {
     const userMessage: Message = {
       id: Date.now().toString(),
       role: 'user',
@@ -19,7 +19,7 @@ export function useQuery(conversationId?: string | null) {
     try {
       const response = await queryDocuments({
         question,
-        conversation_id: conversationId || undefined,
+        conversation_id: conversationId,
         include_history: !!conversationId,
       });
 
@@ -43,7 +43,7 @@ export function useQuery(conversationId?: string | null) {
     } finally {
       setIsLoading(false);
     }
-  }, [conversationId]);
+  }, []);
 
   const clearMessages = useCallback(() => {
     setMessages([]);

@@ -23,14 +23,13 @@ function App() {
     loadConversations,
   } = useConversations();
 
-  // Pass active conversation ID to useQuery
   const {
     messages,
     isLoading: queryLoading,
     sendQuery,
     clearMessages,
     setMessages,
-  } = useQuery(activeConversation?.id);
+  } = useQuery();
 
   // Load messages when active conversation changes
   useEffect(() => {
@@ -57,19 +56,26 @@ function App() {
   };
 
   const handleSendMessage = async (question: string) => {
+    let convId = activeConversation?.id;
+
     // If no active conversation, create one first
-    if (!activeConversation) {
+    if (!convId) {
       const newConv = await createConversation();
       if (newConv) {
-        // Need to wait for state to update, then send
-        // The useQuery hook will pick up the new conversation ID
-        setTimeout(() => sendQuery(question), 100);
-        return;
+        convId = newConv.id;
       }
     }
-    await sendQuery(question);
+
+    // Send query with the conversation ID
+    await sendQuery(question, convId);
+
     // Refresh conversations list to update preview/timestamp
     loadConversations();
+
+    // Refresh active conversation to get the new messages
+    if (convId) {
+      loadConversation(convId);
+    }
   };
 
   return (
