@@ -46,6 +46,11 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
+  transition: opacity 0.2s ease;
+}
+
+.logo:hover {
+  opacity: 0.8;
 }
 
 .logo-icon {
@@ -220,6 +225,7 @@ body {
 
 .message.user {
   flex-direction: row-reverse;
+  justify-content: flex-start;
 }
 
 .message-avatar {
@@ -256,6 +262,8 @@ body {
   background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
   color: white;
   border-bottom-right-radius: 4px;
+  width: fit-content;
+  margin-left: auto;
 }
 
 .message.assistant .message-bubble {
@@ -263,6 +271,7 @@ body {
   backdrop-filter: blur(10px);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-bottom-left-radius: 4px;
+  width: fit-content;
 }
 
 /* Confidence Badge */
@@ -431,6 +440,10 @@ body {
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
 }
 
 /* Scrollbar */

@@ -20,7 +20,7 @@ from app.services.llm_service import (
     extract_quotes,
     verify_quotes_in_context,
 )
-from app.services.conversation_service import conversation_service
+from app.services.chat_service import chat_service
 
 router = APIRouter()
 
@@ -29,8 +29,9 @@ class QueryRequest(BaseModel):
     question: str
     top_k: int = 5
     enable_web_fallback: bool = True  # Allow web search if not found
-    conversation_id: Optional[str] = None  # Optional: save to conversation
-    include_history: bool = True  # Include conversation history in prompt
+    chat_id: Optional[str] = None  # Optional: save to chat
+    project_id: Optional[str] = None  # Required for document search
+    include_history: bool = True  # Include chat history in prompt
 
 
 class Citation(BaseModel):
@@ -125,7 +126,7 @@ class QueryResponse(BaseModel):
     answer: str
     citations: list[Citation]
     reasoning: Reasoning
-    conversation_id: Optional[str] = None  # If saved to conversation
+    chat_id: Optional[str] = None  # If saved to chat
     message_id: Optional[str] = None  # ID of saved assistant message
 
 
@@ -166,22 +167,22 @@ def detect_chitchat(text: str) -> tuple[bool, str]:
 
 @router.post("/query", response_model=QueryResponse)
 async def query_documents(request: QueryRequest):
-    """Query documents with hybrid search, deterministic MCQ handling, and conversation support."""
+    """Query documents with hybrid search, deterministic MCQ handling, and chat support."""
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
 
     # Check for chitchat first
     is_chitchat, chitchat_response = detect_chitchat(request.question)
     if is_chitchat:
-        # Save messages to conversation if provided
-        if request.conversation_id:
-            conversation_service.add_message(
-                conversation_id=request.conversation_id,
+        # Save messages to chat if provided
+        if request.chat_id:
+            chat_service.add_message(
+                chat_id=request.chat_id,
                 role="user",
                 content=request.question
             )
-            msg = conversation_service.add_message(
-                conversation_id=request.conversation_id,
+            msg = chat_service.add_message(
+                chat_id=request.chat_id,
                 role="assistant",
                 content=chitchat_response
             )
@@ -189,7 +190,7 @@ async def query_documents(request: QueryRequest):
                 answer=chitchat_response,
                 citations=[],
                 reasoning=Reasoning(prompt_sent="[Chitchat detected - no search performed]"),
-                conversation_id=request.conversation_id,
+                chat_id=request.chat_id,
                 message_id=msg["id"]
             )
         return QueryResponse(
@@ -198,25 +199,25 @@ async def query_documents(request: QueryRequest):
             reasoning=Reasoning(prompt_sent="[Chitchat detected - no search performed]")
         )
 
-    # Load conversation history if provided
-    conversation_history = []
-    if request.conversation_id and request.include_history:
-        conversation_history = conversation_service.get_recent_messages(
-            request.conversation_id, max_turns=5
+    # Load chat history if provided
+    chat_history = []
+    if request.chat_id and request.include_history:
+        chat_history = chat_service.get_recent_messages(
+            request.chat_id, max_turns=5
         )
 
-    # Save user message to conversation
-    if request.conversation_id:
-        conversation_service.add_message(
-            conversation_id=request.conversation_id,
+    # Save user message to chat
+    if request.chat_id:
+        chat_service.add_message(
+            chat_id=request.chat_id,
             role="user",
             content=request.question
         )
         # Update title if this is the first message
-        conv = conversation_service.get_conversation(request.conversation_id)
-        if conv and len(conv.get("messages", [])) == 1:
-            conversation_service.update_conversation_title_from_message(
-                request.conversation_id, request.question
+        chat = chat_service.get_chat(request.chat_id)
+        if chat and len(chat.get("messages", [])) == 1:
+            chat_service.update_chat_title_from_message(
+                request.chat_id, request.question
             )
 
     # Detect if this is an MCQ question
@@ -227,16 +228,17 @@ async def query_documents(request: QueryRequest):
             request.question,
             mcq_options,
             enable_web_fallback=request.enable_web_fallback,
-            conversation_history=conversation_history
+            conversation_history=chat_history,
+            project_id=request.project_id
         )
     else:
-        response = await _handle_standard_query(request, conversation_history)
+        response = await _handle_standard_query(request, chat_history)
 
-    # Save assistant response to conversation
+    # Save assistant response to chat
     message_id = None
-    if request.conversation_id:
-        msg = conversation_service.add_message(
-            conversation_id=request.conversation_id,
+    if request.chat_id:
+        msg = chat_service.add_message(
+            chat_id=request.chat_id,
             role="assistant",
             content=response.answer,
             citations=[c.model_dump() for c in response.citations],
@@ -244,8 +246,8 @@ async def query_documents(request: QueryRequest):
         )
         message_id = msg["id"]
 
-    # Add conversation info to response
-    response.conversation_id = request.conversation_id
+    # Add chat info to response
+    response.chat_id = request.chat_id
     response.message_id = message_id
 
     return response
@@ -255,7 +257,8 @@ async def _handle_mcq_query_deterministic(
     question: str,
     mcq_options: list[str],
     enable_web_fallback: bool = True,
-    conversation_history: list[dict] = None
+    conversation_history: list[dict] = None,
+    project_id: str = None
 ) -> QueryResponse:
     """
     NEW: Deterministic MCQ handling that prevents hallucination.
@@ -282,7 +285,7 @@ async def _handle_mcq_query_deterministic(
         search_terms = mcq_options
 
     # Stage 2: Grep search with context
-    grep_results = vector_store.grep_search(search_terms, context_lines=3)
+    grep_results = vector_store.grep_search(search_terms, context_lines=3, project_id=project_id)
     
     # Stage 3: CRITICAL - Deterministically validate which options appear in documents
     # Also search in ALL documents, not just grep results
@@ -303,7 +306,7 @@ async def _handle_mcq_query_deterministic(
                 })
         
         # Also do a comprehensive search across ALL documents
-        all_doc_matches = vector_store.find_option_in_all_documents(option)
+        all_doc_matches = vector_store.find_option_in_all_documents(option, project_id=project_id)
         for match in all_doc_matches:
             # Avoid duplicates
             is_duplicate = any(
@@ -440,13 +443,13 @@ Justification: This option was the ONLY one found in the uploaded documents. The
 
 async def _handle_standard_query(
     request: QueryRequest,
-    conversation_history: list[dict] = None
+    chat_history: list[dict] = None
 ) -> QueryResponse:
     """Handle non-MCQ questions with standard hybrid search."""
 
     try:
         results, keywords, search_info = await vector_store.search(
-            request.question, top_k=request.top_k
+            request.question, top_k=request.top_k, project_id=request.project_id
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
@@ -468,7 +471,7 @@ async def _handle_standard_query(
         answer, prompt_sent = await generate_answer(
             request.question,
             results,
-            conversation_history=conversation_history
+            conversation_history=chat_history
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate answer: {str(e)}")
@@ -582,15 +585,15 @@ async def query_documents_stream(request: QueryRequest):
             # Check for chitchat first
             is_chitchat, chitchat_response = detect_chitchat(request.question)
             if is_chitchat:
-                # Save messages to conversation if provided
-                if request.conversation_id:
-                    conversation_service.add_message(
-                        conversation_id=request.conversation_id,
+                # Save messages to chat if provided
+                if request.chat_id:
+                    chat_service.add_message(
+                        chat_id=request.chat_id,
                         role="user",
                         content=request.question
                     )
-                    conversation_service.add_message(
-                        conversation_id=request.conversation_id,
+                    chat_service.add_message(
+                        chat_id=request.chat_id,
                         role="assistant",
                         content=chitchat_response
                     )
@@ -610,24 +613,24 @@ async def query_documents_stream(request: QueryRequest):
                 yield sse_event("done", {"status": "complete"})
                 return
 
-            # Load conversation history if provided
-            conversation_history = []
-            if request.conversation_id and request.include_history:
-                conversation_history = conversation_service.get_recent_messages(
-                    request.conversation_id, max_turns=5
+            # Load chat history if provided
+            chat_history = []
+            if request.chat_id and request.include_history:
+                chat_history = chat_service.get_recent_messages(
+                    request.chat_id, max_turns=5
                 )
 
-            # Save user message to conversation
-            if request.conversation_id:
-                conversation_service.add_message(
-                    conversation_id=request.conversation_id,
+            # Save user message to chat
+            if request.chat_id:
+                chat_service.add_message(
+                    chat_id=request.chat_id,
                     role="user",
                     content=request.question
                 )
-                conv = conversation_service.get_conversation(request.conversation_id)
-                if conv and len(conv.get("messages", [])) == 1:
-                    conversation_service.update_conversation_title_from_message(
-                        request.conversation_id, request.question
+                chat = chat_service.get_chat(request.chat_id)
+                if chat and len(chat.get("messages", [])) == 1:
+                    chat_service.update_chat_title_from_message(
+                        request.chat_id, request.question
                     )
 
             # Stage 1: Detect question type
@@ -644,15 +647,16 @@ async def query_documents_stream(request: QueryRequest):
                     request.question,
                     mcq_options,
                     enable_web_fallback=request.enable_web_fallback,
-                    conversation_history=conversation_history,
-                    conversation_id=request.conversation_id
+                    chat_history=chat_history,
+                    chat_id=request.chat_id,
+                    project_id=request.project_id
                 ):
                     yield event
             else:
                 # Standard query streaming pipeline
                 async for event in _handle_standard_stream(
                     request,
-                    conversation_history=conversation_history
+                    chat_history=chat_history
                 ):
                     yield event
 
@@ -680,8 +684,9 @@ async def _handle_mcq_stream(
     question: str,
     mcq_options: list[str],
     enable_web_fallback: bool = True,
-    conversation_history: list[dict] = None,
-    conversation_id: str = None
+    chat_history: list[dict] = None,
+    chat_id: str = None,
+    project_id: str = None
 ) -> AsyncGenerator[str, None]:
     """Stream MCQ pipeline with status updates."""
 
@@ -708,7 +713,7 @@ async def _handle_mcq_stream(
         "details": {"terms": search_terms[:5]}
     })
 
-    grep_results = vector_store.grep_search(search_terms, context_lines=3)
+    grep_results = vector_store.grep_search(search_terms, context_lines=3, project_id=project_id)
 
     # Stage: Validating
     yield sse_event("status", {
@@ -733,7 +738,7 @@ async def _handle_mcq_stream(
                     "match_line": result["match_line"],
                 })
 
-        all_doc_matches = vector_store.find_option_in_all_documents(option)
+        all_doc_matches = vector_store.find_option_in_all_documents(option, project_id=project_id)
         for match in all_doc_matches:
             is_duplicate = any(
                 ev["filename"] == match["filename"] and ev["page"] == match["page"]
@@ -875,10 +880,10 @@ async def _handle_mcq_stream(
 
     yield sse_event("reasoning", {"reasoning": reasoning})
 
-    # Save to conversation if provided
-    if conversation_id:
-        conversation_service.add_message(
-            conversation_id=conversation_id,
+    # Save to chat if provided
+    if chat_id:
+        chat_service.add_message(
+            chat_id=chat_id,
             role="assistant",
             content=full_answer,
             citations=citations,
@@ -888,7 +893,7 @@ async def _handle_mcq_stream(
 
 async def _handle_standard_stream(
     request: QueryRequest,
-    conversation_history: list[dict] = None
+    chat_history: list[dict] = None
 ) -> AsyncGenerator[str, None]:
     """Stream standard query with status updates."""
 
@@ -900,7 +905,7 @@ async def _handle_standard_stream(
 
     try:
         results, keywords, search_info = await vector_store.search(
-            request.question, top_k=request.top_k
+            request.question, top_k=request.top_k, project_id=request.project_id
         )
     except Exception as e:
         yield sse_event("error", {
@@ -958,7 +963,7 @@ async def _handle_standard_stream(
     async for token_or_prompt in generate_answer_stream(
         request.question,
         results,
-        conversation_history=conversation_history
+        conversation_history=chat_history
     ):
         if isinstance(token_or_prompt, dict):
             prompt_sent = token_or_prompt.get("prompt", "")
@@ -1013,10 +1018,10 @@ async def _handle_standard_stream(
 
     yield sse_event("reasoning", {"reasoning": reasoning})
 
-    # Save to conversation if provided
-    if request.conversation_id:
-        conversation_service.add_message(
-            conversation_id=request.conversation_id,
+    # Save to chat if provided
+    if request.chat_id:
+        chat_service.add_message(
+            chat_id=request.chat_id,
             role="assistant",
             content=full_answer,
             citations=citations,

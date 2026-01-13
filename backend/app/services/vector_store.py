@@ -34,24 +34,60 @@ class VectorStore:
             path=str(settings.chroma_dir),
             settings=ChromaSettings(anonymized_telemetry=False),
         )
+        # Legacy collection for backwards compatibility
         self.collection = self.client.get_or_create_collection(
             name="documents",
             metadata={"hnsw:space": "cosine"},
         )
+        # Cache for project collections
+        self._project_collections: dict[str, Any] = {}
 
-    async def add_chunks(self, filename: str, chunks: list[dict]) -> None:
+    def get_project_collection(self, project_id: str) -> Any:
+        """Get or create a ChromaDB collection for a project."""
+        if project_id not in self._project_collections:
+            collection_name = f"project_{project_id}"
+            self._project_collections[project_id] = self.client.get_or_create_collection(
+                name=collection_name,
+                metadata={"hnsw:space": "cosine"},
+            )
+        return self._project_collections[project_id]
+
+    def delete_project_collection(self, project_id: str) -> None:
+        """Delete a project's ChromaDB collection."""
+        collection_name = f"project_{project_id}"
+        try:
+            self.client.delete_collection(collection_name)
+            self._project_collections.pop(project_id, None)
+        except ValueError:
+            pass  # Collection doesn't exist
+
+    def _get_collection(self, project_id: str = None) -> Any:
+        """Get collection - project-specific if project_id provided, else legacy."""
+        if project_id:
+            return self.get_project_collection(project_id)
+        return self.collection
+
+    async def add_chunks(self, filename: str, chunks: list[dict], project_id: str = None, document_id: str = None) -> None:
         """Add document chunks to the vector store."""
         if not chunks:
             return
 
+        collection = self._get_collection(project_id)
+
         texts = [chunk["text"] for chunk in chunks]
         embeddings = await get_embeddings_batch(texts)
 
-        ids = [f"{filename}_p{chunk['page']}_c{chunk['chunk_id']}" for chunk in chunks]
-        documents = texts
-        metadatas = [{"filename": filename, "page": chunk["page"]} for chunk in chunks]
+        # Include document_id in the ID if provided (for project-based storage)
+        if document_id:
+            ids = [f"{document_id}_p{chunk['page']}_c{chunk['chunk_id']}" for chunk in chunks]
+            metadatas = [{"filename": filename, "page": chunk["page"], "document_id": document_id} for chunk in chunks]
+        else:
+            ids = [f"{filename}_p{chunk['page']}_c{chunk['chunk_id']}" for chunk in chunks]
+            metadatas = [{"filename": filename, "page": chunk["page"]} for chunk in chunks]
 
-        self.collection.add(
+        documents = texts
+
+        collection.add(
             ids=ids,
             embeddings=embeddings,
             documents=documents,
@@ -180,22 +216,24 @@ class VectorStore:
             for r in sorted_results
         ]
 
-    async def search(self, query: str, top_k: int = 5) -> tuple[list[dict], list[str], dict]:
+    async def search(self, query: str, top_k: int = 5, project_id: str = None) -> tuple[list[dict], list[str], dict]:
         """Hybrid search: combine keyword and semantic search."""
-        if self.collection.count() == 0:
+        collection = self._get_collection(project_id)
+
+        if collection.count() == 0:
             return [], [], {"is_mcq": False, "mcq_options": []}
 
         is_mcq, mcq_options = self._detect_mcq_options(query)
         effective_top_k = top_k * 2 if is_mcq else top_k
 
         keywords = self._extract_keywords(query, mcq_options if is_mcq else None)
-        all_data = self.collection.get(include=["documents", "metadatas"])
+        all_data = collection.get(include=["documents", "metadatas"])
         keyword_results = self._keyword_search(all_data, keywords)
 
         query_embedding = await get_embedding(query)
-        semantic_results = self.collection.query(
+        semantic_results = collection.query(
             query_embeddings=[query_embedding],
-            n_results=min(effective_top_k * 2, self.collection.count()),
+            n_results=min(effective_top_k * 2, collection.count()),
             include=["documents", "metadatas", "distances"],
         )
 
@@ -211,11 +249,13 @@ class VectorStore:
     def grep_search(
         self,
         search_terms: list[str],
-        context_lines: int = 3
+        context_lines: int = 3,
+        project_id: str = None
     ) -> list[dict]:
         """Grep-style search: find exact matches with surrounding context."""
         results = []
-        all_data = self.collection.get(include=["documents", "metadatas"])
+        collection = self._get_collection(project_id)
+        all_data = collection.get(include=["documents", "metadatas"])
 
         if not all_data.get("documents"):
             return results
@@ -302,20 +342,22 @@ class VectorStore:
         
         return found_options
 
-    def get_all_text_for_search(self) -> str:
+    def get_all_text_for_search(self, project_id: str = None) -> str:
         """Get all document text for comprehensive option search."""
-        all_data = self.collection.get(include=["documents"])
+        collection = self._get_collection(project_id)
+        all_data = collection.get(include=["documents"])
         if not all_data.get("documents"):
             return ""
         return " ".join(all_data["documents"])
 
-    def find_option_in_all_documents(self, option: str) -> list[dict]:
+    def find_option_in_all_documents(self, option: str, project_id: str = None) -> list[dict]:
         """
         Search for a specific option across ALL documents (not just grep results).
         Returns list of matches with page/file info.
         """
         results = []
-        all_data = self.collection.get(include=["documents", "metadatas"])
+        collection = self._get_collection(project_id)
+        all_data = collection.get(include=["documents", "metadatas"])
         
         if not all_data.get("documents"):
             return results
@@ -342,15 +384,16 @@ class VectorStore:
         
         return results
 
-    def delete_document(self, filename: str) -> None:
+    def delete_document(self, filename: str, project_id: str = None) -> None:
         """Delete all chunks for a document."""
-        results = self.collection.get(
+        collection = self._get_collection(project_id)
+        results = collection.get(
             where={"filename": filename},
             include=[],
         )
 
         if results["ids"]:
-            self.collection.delete(ids=results["ids"])
+            collection.delete(ids=results["ids"])
 
     def reset(self) -> None:
         """Delete and recreate the collection."""

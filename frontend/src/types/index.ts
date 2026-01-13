@@ -93,7 +93,8 @@ export interface QueryRequest {
   question: string;
   top_k?: number;
   enable_web_fallback?: boolean;
-  conversation_id?: string;
+  chat_id?: string;
+  project_id?: string;
   include_history?: boolean;
 }
 
@@ -101,13 +102,43 @@ export interface QueryResponse {
   answer: string;
   citations: Citation[];
   reasoning: Reasoning;
-  conversation_id?: string;
+  chat_id?: string;
   message_id?: string;
 }
 
-// Conversation types
-export interface Conversation {
+// Project types
+export interface Project {
   id: string;
+  name: string;
+  description?: string;
+  color: string;
+  created_at: string;
+  updated_at: string;
+  document_count?: number;
+  chat_count?: number;
+}
+
+export interface ProjectDetail extends Project {
+  recent_documents?: Document[];
+  recent_chats?: Chat[];
+}
+
+// Document types
+export interface Document {
+  id: string;
+  project_id: string;
+  filename: string;
+  filepath: string;
+  file_size?: number;
+  page_count?: number;
+  chunk_count?: number;
+  uploaded_at: string;
+}
+
+// Chat types (replaces Conversation)
+export interface Chat {
+  id: string;
+  project_id: string;
   title: string;
   created_at: string;
   updated_at: string;
@@ -115,21 +146,35 @@ export interface Conversation {
   preview?: string;
 }
 
-export interface ConversationDetail extends Conversation {
+export interface ChatDetail extends Chat {
   messages: Message[];
 }
 
-export interface ConversationList {
-  conversations: Conversation[];
+export interface ChatList {
+  chats: Chat[];
   total: number;
   page: number;
   per_page: number;
 }
 
+// Search result type - includes matched_content from backend
+export interface ChatSearchResult extends Chat {
+  matched_content?: string;
+}
+
+// Legacy aliases for backwards compatibility during migration
+export type Conversation = Chat;
+export type ConversationDetail = ChatDetail;
+export type ConversationList = ChatList;
+export type ConversationSearchResult = ChatSearchResult;
+
 export interface UploadResponse {
+  id: string;
   filename: string;
+  project_id: string;
   pages: number;
   chunks: number;
+  file_size?: number;
 }
 
 // Streaming types

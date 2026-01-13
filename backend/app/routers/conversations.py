@@ -1,68 +1,96 @@
-"""API endpoints for conversation management."""
+"""API endpoints for chat/conversation management."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
 
-from app.services.conversation_service import conversation_service
+from app.services.chat_service import chat_service
+from app.services.project_service import project_service
 
 router = APIRouter()
 
 
-class ConversationCreate(BaseModel):
+class ChatCreate(BaseModel):
     title: Optional[str] = None
 
 
-class ConversationUpdate(BaseModel):
+class ChatUpdate(BaseModel):
     title: str
 
 
 @router.get("")
-async def list_conversations(page: int = 1, per_page: int = 20):
-    """List all conversations with pagination."""
-    return conversation_service.list_conversations(page=page, per_page=per_page)
+async def list_chats(
+    project_id: str = Query(..., description="Project ID to list chats from"),
+    page: int = 1,
+    per_page: int = 20
+):
+    """List all chats in a project with pagination."""
+    # Verify project exists
+    project = project_service.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    return chat_service.list_chats(project_id, page=page, per_page=per_page)
 
 
 @router.post("")
-async def create_conversation(data: ConversationCreate = None):
-    """Create a new conversation."""
+async def create_chat(
+    project_id: str = Query(..., description="Project ID to create chat in"),
+    data: ChatCreate = None
+):
+    """Create a new chat in a project."""
+    # Verify project exists
+    project = project_service.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
     title = data.title if data else None
-    return conversation_service.create_conversation(title=title)
+    return chat_service.create_chat(project_id, title=title)
 
 
 @router.get("/search")
-async def search_conversations(q: str, limit: int = 20):
-    """Search conversations by message content."""
+async def search_chats(
+    project_id: str = Query(..., description="Project ID to search in"),
+    q: str = Query(..., description="Search query"),
+    limit: int = 20
+):
+    """Search chats by message content within a project."""
     if not q.strip():
         raise HTTPException(status_code=400, detail="Search query cannot be empty")
-    return conversation_service.search_conversations(query=q, limit=limit)
+
+    # Verify project exists
+    project = project_service.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    return chat_service.search_chats(project_id, query=q, limit=limit)
 
 
-@router.get("/{conversation_id}")
-async def get_conversation(conversation_id: str):
-    """Get a conversation with all its messages."""
-    conversation = conversation_service.get_conversation(conversation_id)
-    if not conversation:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    return conversation
+@router.get("/{chat_id}")
+async def get_chat(chat_id: str):
+    """Get a chat with all its messages."""
+    chat = chat_service.get_chat(chat_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return chat
 
 
-@router.patch("/{conversation_id}")
-async def update_conversation(conversation_id: str, data: ConversationUpdate):
-    """Update conversation title."""
+@router.patch("/{chat_id}")
+async def update_chat(chat_id: str, data: ChatUpdate):
+    """Update chat title."""
     if not data.title.strip():
         raise HTTPException(status_code=400, detail="Title cannot be empty")
 
-    conversation = conversation_service.update_conversation(conversation_id, data.title)
-    if not conversation:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    return conversation
+    chat = chat_service.update_chat(chat_id, data.title)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return chat
 
 
-@router.delete("/{conversation_id}")
-async def delete_conversation(conversation_id: str):
-    """Delete a conversation and all its messages."""
-    deleted = conversation_service.delete_conversation(conversation_id)
+@router.delete("/{chat_id}")
+async def delete_chat(chat_id: str):
+    """Delete a chat and all its messages."""
+    deleted = chat_service.delete_chat(chat_id)
     if not deleted:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    return {"status": "deleted", "id": conversation_id}
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return {"status": "deleted", "id": chat_id}

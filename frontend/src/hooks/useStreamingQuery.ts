@@ -128,7 +128,7 @@ export function useStreamingQuery() {
     }
   }, []);
 
-  const sendQuery = useCallback(async (question: string, conversationId?: string) => {
+  const sendQuery = useCallback(async (question: string, chatId?: string, projectId?: string) => {
     // Cancel any existing request
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -153,8 +153,9 @@ export function useStreamingQuery() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           question,
-          conversation_id: conversationId,
-          include_history: !!conversationId,
+          chat_id: chatId,
+          project_id: projectId,
+          include_history: !!chatId,
         }),
         signal: abortControllerRef.current.signal,
       });

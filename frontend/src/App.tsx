@@ -4,7 +4,9 @@ import { useDocuments } from './hooks/useDocuments';
 import { useQuery } from './hooks/useQuery';
 import { useStreamingQuery } from './hooks/useStreamingQuery';
 import { useConversations } from './hooks/useConversations';
-import type { Message, Conversation } from './types';
+import { useConversationSearch } from './hooks/useConversationSearch';
+import { useProjects } from './hooks/useProjects';
+import type { Message, Chat, ChatSearchResult, Project, Document } from './types';
 
 // Icons
 const Icons = {
@@ -43,6 +45,11 @@ const Icons = {
       <path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
     </svg>
   ),
+  User: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+    </svg>
+  ),
   Check: () => (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M20 6 9 17l-5-5"/>
@@ -57,6 +64,26 @@ const Icons = {
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
       <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
+    </svg>
+  ),
+  Search: () => (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+    </svg>
+  ),
+  X: () => (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
+    </svg>
+  ),
+  Loader: () => (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-spin">
+      <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+    </svg>
+  ),
+  Folder: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>
     </svg>
   ),
 };
@@ -77,7 +104,22 @@ const StatusDot = ({ status }: { status: 'online' | 'offline' }) => (
 
 function App() {
   const health = useHealth();
-  const { documents, isLoading: docsLoading, upload, remove, reset } = useDocuments();
+
+  // Projects
+  const {
+    projects,
+    activeProject,
+    setActiveProjectId,
+    createProject,
+    deleteProject,
+  } = useProjects();
+
+  const activeProjectId = activeProject?.id || null;
+
+  // Documents (per project)
+  const { documents, isLoading: docsLoading, upload, remove: removeDocument } = useDocuments(activeProjectId);
+
+  // Conversations (per project)
   const {
     conversations,
     activeConversation,
@@ -87,7 +129,7 @@ function App() {
     remove: removeConversation,
     clearActive,
     loadConversations,
-  } = useConversations();
+  } = useConversations(activeProjectId);
 
   const {
     messages,
@@ -107,13 +149,38 @@ function App() {
     resetState: resetStreamState,
   } = useStreamingQuery();
 
+  const {
+    query: searchQuery,
+    setQuery: setSearchQuery,
+    results: searchResults,
+    isSearching,
+    isActive: isSearchActive,
+    clearSearch,
+  } = useConversationSearch(activeProjectId);
+
   const [activeTab, setActiveTab] = useState<'chats' | 'docs'>('chats');
   const [inputValue, setInputValue] = useState('');
   const [showSources, setShowSources] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [showProjectSelector, setShowProjectSelector] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const hasProcessedCompletion = useRef(false);
+  const skipNextConversationEffect = useRef(false);
+
+  // Auto-select project with documents, or first project
+  useEffect(() => {
+    if (!activeProjectId && projects.length > 0) {
+      // Prefer a project that has documents
+      const projectWithDocs = projects.find((p: Project) => (p.document_count || 0) > 0);
+      if (projectWithDocs) {
+        setActiveProjectId(projectWithDocs.id);
+      } else {
+        setActiveProjectId(projects[0].id);
+      }
+    }
+  }, [projects, activeProjectId, setActiveProjectId]);
 
   // Scroll to bottom
   useEffect(() => {
@@ -122,6 +189,10 @@ function App() {
 
   // Load messages when active conversation changes
   useEffect(() => {
+    if (skipNextConversationEffect.current) {
+      skipNextConversationEffect.current = false;
+      return;
+    }
     if (activeConversation?.messages) {
       setMessages(activeConversation.messages);
     } else {
@@ -164,11 +235,12 @@ function App() {
   }, [isStreaming]);
 
   const handleSendMessage = async () => {
-    if (!inputValue.trim() || isStreaming) return;
+    if (!inputValue.trim() || isStreaming || !activeProjectId) return;
 
     let convId = activeConversation?.id;
 
     if (!convId) {
+      skipNextConversationEffect.current = true;
       const newConv = await createConversation();
       if (newConv) {
         convId = newConv.id;
@@ -183,7 +255,7 @@ function App() {
     setMessages((prev: Message[]) => [...prev, userMessage]);
     setInputValue('');
 
-    await sendStreamingQuery(inputValue, convId);
+    await sendStreamingQuery(inputValue, convId, activeProjectId);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -196,11 +268,13 @@ function App() {
   const handleNewChat = async () => {
     await createConversation();
     resetStreamState();
+    clearSearch();
   };
 
   const handleSelectConversation = async (id: string) => {
     await loadConversation(id);
     resetStreamState();
+    clearSearch();
   };
 
   const handleFileUpload = async (file: File) => {
@@ -214,6 +288,14 @@ function App() {
     if (file?.type === 'application/pdf') {
       handleFileUpload(file);
     }
+  };
+
+  const handleCreateProject = async () => {
+    if (!newProjectName.trim()) return;
+    const project = await createProject(newProjectName.trim());
+    setActiveProjectId(project.id);
+    setNewProjectName('');
+    setShowProjectSelector(false);
   };
 
   const formatTime = (dateStr: string) => {
@@ -235,12 +317,130 @@ function App() {
       <aside className="sidebar">
         {/* Header */}
         <div style={{ padding: '20px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
-          <div className="logo" style={{ marginBottom: '20px' }}>
+          <div
+            className="logo"
+            style={{ marginBottom: '20px', cursor: 'pointer' }}
+            onClick={() => { clearActive(); clearMessages(); resetStreamState(); clearSearch(); }}
+          >
             <div className="logo-icon">
               <Icons.Sparkles />
             </div>
             <span className="logo-text">Vladko</span>
           </div>
+
+          {/* Project Selector */}
+          <div style={{ marginBottom: '16px', position: 'relative' }}>
+            <button
+              onClick={() => setShowProjectSelector(!showProjectSelector)}
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                background: 'rgba(99, 102, 241, 0.1)',
+                border: '1px solid rgba(99, 102, 241, 0.3)',
+                borderRadius: '8px',
+                color: '#fff',
+                fontSize: '13px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                justifyContent: 'space-between',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Icons.Folder />
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {activeProject?.name || 'Select Project'}
+                </span>
+              </div>
+              <Icons.ChevronDown />
+            </button>
+
+            {showProjectSelector && (
+              <div style={{
+                position: 'absolute',
+                top: '100%',
+                left: 0,
+                right: 0,
+                marginTop: '4px',
+                background: '#1a1a2e',
+                border: '1px solid rgba(255,255,255,0.1)',
+                borderRadius: '8px',
+                zIndex: 100,
+                maxHeight: '300px',
+                overflowY: 'auto',
+              }}>
+                {projects.map((project: Project) => (
+                  <div
+                    key={project.id}
+                    onClick={() => {
+                      setActiveProjectId(project.id);
+                      setShowProjectSelector(false);
+                    }}
+                    style={{
+                      padding: '10px 12px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      background: project.id === activeProjectId ? 'rgba(99, 102, 241, 0.2)' : 'transparent',
+                      borderBottom: '1px solid rgba(255,255,255,0.05)',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: project.color }} />
+                      <span style={{ color: '#fff', fontSize: '13px' }}>{project.name}</span>
+                    </div>
+                    <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)' }}>
+                      {project.document_count || 0} docs
+                    </span>
+                  </div>
+                ))}
+                <div style={{ padding: '8px', borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+                  <input
+                    type="text"
+                    value={newProjectName}
+                    onChange={(e) => setNewProjectName(e.target.value)}
+                    placeholder="New project name..."
+                    onKeyDown={(e) => e.key === 'Enter' && handleCreateProject()}
+                    style={{
+                      width: '100%',
+                      padding: '8px',
+                      background: 'rgba(255,255,255,0.05)',
+                      border: '1px solid rgba(255,255,255,0.1)',
+                      borderRadius: '6px',
+                      color: '#fff',
+                      fontSize: '13px',
+                      outline: 'none',
+                      marginBottom: '8px',
+                    }}
+                  />
+                  <button
+                    onClick={handleCreateProject}
+                    disabled={!newProjectName.trim()}
+                    style={{
+                      width: '100%',
+                      padding: '8px',
+                      background: newProjectName.trim() ? 'rgba(99, 102, 241, 0.3)' : 'rgba(255,255,255,0.05)',
+                      border: 'none',
+                      borderRadius: '6px',
+                      color: newProjectName.trim() ? '#fff' : 'rgba(255,255,255,0.3)',
+                      fontSize: '13px',
+                      cursor: newProjectName.trim() ? 'pointer' : 'not-allowed',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '6px',
+                    }}
+                  >
+                    <Icons.Plus />
+                    Create Project
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
           <div style={{ display: 'flex', gap: '16px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'rgba(255,255,255,0.5)' }}>
               <StatusDot status={health.api === 'ok' ? 'online' : 'offline'} />
@@ -274,23 +474,70 @@ function App() {
         {/* New Chat / Upload */}
         <div style={{ padding: '12px' }}>
           {activeTab === 'chats' ? (
-            <button className="new-chat-btn" onClick={handleNewChat}>
-              <Icons.Plus />
-              New Chat
-            </button>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <button className="new-chat-btn" onClick={handleNewChat} disabled={!activeProjectId}>
+                <Icons.Plus />
+                New Chat
+              </button>
+              {/* Search bar */}
+              <div style={{ position: 'relative' }}>
+                <div style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'rgba(255,255,255,0.4)' }}>
+                  <Icons.Search />
+                </div>
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search chats..."
+                  disabled={!activeProjectId}
+                  style={{
+                    width: '100%',
+                    padding: '8px 32px 8px 32px',
+                    background: 'rgba(255,255,255,0.05)',
+                    border: '1px solid rgba(255,255,255,0.1)',
+                    borderRadius: '8px',
+                    color: '#fff',
+                    fontSize: '13px',
+                    outline: 'none',
+                  }}
+                />
+                {searchQuery && (
+                  <button
+                    onClick={clearSearch}
+                    style={{
+                      position: 'absolute',
+                      right: '8px',
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      background: 'none',
+                      border: 'none',
+                      color: 'rgba(255,255,255,0.4)',
+                      cursor: 'pointer',
+                      padding: '2px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    {isSearching ? <Icons.Loader /> : <Icons.X />}
+                  </button>
+                )}
+              </div>
+            </div>
           ) : (
             <div
-              className={`upload-zone ${dragOver ? 'dragover' : ''}`}
+              className={`upload-zone ${dragOver ? 'dragover' : ''} ${!activeProjectId ? 'disabled' : ''}`}
               onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
               onDragLeave={() => setDragOver(false)}
-              onDrop={handleDrop}
-              onClick={() => fileInputRef.current?.click()}
+              onDrop={activeProjectId ? handleDrop : undefined}
+              onClick={() => activeProjectId && fileInputRef.current?.click()}
+              style={{ opacity: activeProjectId ? 1 : 0.5, cursor: activeProjectId ? 'pointer' : 'not-allowed' }}
             >
               <div style={{ color: 'rgba(255,255,255,0.3)', marginBottom: '8px' }}>
                 <Icons.Upload />
               </div>
               <div style={{ fontSize: '13px', color: 'rgba(255,255,255,0.5)' }}>
-                Drop PDF or click to upload
+                {activeProjectId ? 'Drop PDF or click to upload' : 'Select a project first'}
               </div>
               <input
                 ref={fileInputRef}
@@ -305,13 +552,53 @@ function App() {
 
         {/* List */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px' }}>
-          {activeTab === 'chats' ? (
-            conversations.length === 0 ? (
+          {!activeProjectId ? (
+            <div style={{ padding: '20px', textAlign: 'center', color: 'rgba(255,255,255,0.4)', fontSize: '13px' }}>
+              Select a project to get started
+            </div>
+          ) : activeTab === 'chats' ? (
+            isSearchActive ? (
+              // Search results
+              <>
+                {isSearching ? (
+                  <div style={{ padding: '20px', textAlign: 'center', color: 'rgba(255,255,255,0.4)', fontSize: '13px' }}>
+                    Searching...
+                  </div>
+                ) : searchResults.length === 0 ? (
+                  <div style={{ padding: '20px', textAlign: 'center', color: 'rgba(255,255,255,0.4)', fontSize: '13px' }}>
+                    No results found for "{searchQuery}"
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ padding: '8px 12px', fontSize: '12px', color: 'rgba(255,255,255,0.5)' }}>
+                      {searchResults.length} result{searchResults.length !== 1 ? 's' : ''} for "{searchQuery}"
+                    </div>
+                    {searchResults.map((result: ChatSearchResult) => (
+                      <div
+                        key={result.id}
+                        className={`list-item ${activeConversation?.id === result.id ? 'active' : ''}`}
+                        onClick={() => handleSelectConversation(result.id)}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+                          <div style={{ fontSize: '14px', fontWeight: 500, color: '#fff' }}>{result.title}</div>
+                          <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)' }}>{formatTime(result.updated_at)}</span>
+                        </div>
+                        {result.matched_content && (
+                          <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.5)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', background: 'rgba(99, 102, 241, 0.1)', padding: '4px 8px', borderRadius: '4px', marginTop: '4px' }}>
+                            "{result.matched_content}"
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </>
+                )}
+              </>
+            ) : conversations.length === 0 ? (
               <div style={{ padding: '20px', textAlign: 'center', color: 'rgba(255,255,255,0.4)', fontSize: '13px' }}>
-                No conversations yet
+                No chats yet
               </div>
             ) : (
-              conversations.map((conv: Conversation) => (
+              conversations.map((conv: Chat) => (
                 <div
                   key={conv.id}
                   className={`list-item ${activeConversation?.id === conv.id ? 'active' : ''}`}
@@ -341,17 +628,20 @@ function App() {
                 No documents uploaded
               </div>
             ) : (
-              documents.map((doc: string, i: number) => (
-                <div key={i} className="list-item">
+              documents.map((doc: Document) => (
+                <div key={doc.id} className="list-item">
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                     <div style={{ width: '36px', height: '36px', background: 'linear-gradient(135deg, rgba(239,68,68,0.2) 0%, rgba(249,115,22,0.2) 100%)', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#f97316' }}>
                       <Icons.File />
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: '13px', fontWeight: 500, color: '#fff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc}</div>
+                      <div style={{ fontSize: '13px', fontWeight: 500, color: '#fff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc.filename}</div>
+                      <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)' }}>
+                        {doc.page_count ? `${doc.page_count} pages` : ''} {doc.chunk_count ? `· ${doc.chunk_count} chunks` : ''}
+                      </div>
                     </div>
                     <button
-                      onClick={() => remove(doc)}
+                      onClick={() => removeDocument(doc.id)}
                       style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)', cursor: 'pointer', padding: '4px' }}
                     >
                       <Icons.Trash />
@@ -381,10 +671,12 @@ function App() {
                 <Icons.Sparkles />
               </div>
               <div style={{ fontSize: '20px', fontWeight: 600, color: '#fff', marginBottom: '8px' }}>
-                {documents.length > 0 ? 'Ask a question' : 'Upload a document'}
+                {!activeProjectId ? 'Select a project' : documents.length > 0 ? 'Ask a question' : 'Upload a document'}
               </div>
               <div style={{ fontSize: '14px', color: 'rgba(255,255,255,0.5)', maxWidth: '300px' }}>
-                {documents.length > 0
+                {!activeProjectId
+                  ? 'Choose a project from the dropdown to get started'
+                  : documents.length > 0
                   ? 'I can help you find information in your uploaded documents'
                   : 'Upload a PDF document to get started'}
               </div>
@@ -394,12 +686,10 @@ function App() {
               {messages.map((msg) => (
                 <div key={msg.id} className={`message ${msg.role}`}>
                   <div className="message-avatar">
-                    {msg.role === 'user' ? 'U' : <Icons.Sparkles />}
+                    {msg.role === 'user' ? <Icons.User /> : <Icons.Sparkles />}
                   </div>
-                  <div style={{ maxWidth: '70%' }}>
-                    <div className="message-bubble" style={{ whiteSpace: 'pre-wrap' }}>
-                      {msg.content}
-                    </div>
+                  <div className="message-bubble" style={{ whiteSpace: 'pre-wrap' }}>
+                    {msg.content}
                     {msg.role === 'assistant' && msg.reasoning?.justification && (
                       <div className={`confidence-badge ${msg.reasoning.justification.confidence?.toLowerCase() || 'low'}`}>
                         <Icons.Check />
@@ -481,18 +771,18 @@ function App() {
             <div className="input-container">
               <textarea
                 className="input-field"
-                placeholder={documents.length > 0 ? 'Ask a question about your documents...' : 'Upload a document first...'}
+                placeholder={!activeProjectId ? 'Select a project first...' : documents.length > 0 ? 'Ask a question about your documents...' : 'Upload a document first...'}
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={handleKeyDown}
-                disabled={isBusy || documents.length === 0}
+                disabled={isBusy || documents.length === 0 || !activeProjectId}
                 rows={1}
               />
             </div>
             <button
               className="send-btn"
               onClick={handleSendMessage}
-              disabled={isBusy || !inputValue.trim() || documents.length === 0}
+              disabled={isBusy || !inputValue.trim() || documents.length === 0 || !activeProjectId}
             >
               <Icons.Send />
             </button>

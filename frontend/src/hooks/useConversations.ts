@@ -1,73 +1,83 @@
 import { useState, useEffect, useCallback } from 'react';
-import type { Conversation, ConversationDetail } from '../types';
+import type { Chat, ChatDetail } from '../types';
 import {
-  listConversations,
-  createConversation,
-  getConversation,
-  updateConversation,
-  deleteConversation,
+  listChats,
+  createChat,
+  getChat,
+  updateChat,
+  deleteChat,
 } from '../services/api';
 
-export function useConversations() {
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [activeConversation, setActiveConversation] = useState<ConversationDetail | null>(null);
+export function useConversations(projectId: string | null) {
+  const [conversations, setConversations] = useState<Chat[]>([]);
+  const [activeConversation, setActiveConversation] = useState<ChatDetail | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Load conversations list
+  // Load chats list for current project
   const loadConversations = useCallback(async () => {
+    if (!projectId) {
+      setConversations([]);
+      return;
+    }
+
     setIsLoading(true);
     setError(null);
     try {
-      const result = await listConversations();
-      setConversations(result.conversations);
+      const result = await listChats(projectId);
+      setConversations(result.chats);
     } catch (err) {
-      setError('Failed to load conversations');
-      console.error('Error loading conversations:', err);
+      setError('Failed to load chats');
+      console.error('Error loading chats:', err);
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [projectId]);
 
-  // Load a specific conversation with messages
+  // Load a specific chat with messages
   const loadConversation = useCallback(async (id: string) => {
     setIsLoading(true);
     setError(null);
     try {
-      const conversation = await getConversation(id);
-      setActiveConversation(conversation);
-      return conversation;
+      const chat = await getChat(id);
+      setActiveConversation(chat);
+      return chat;
     } catch (err) {
-      setError('Failed to load conversation');
-      console.error('Error loading conversation:', err);
+      setError('Failed to load chat');
+      console.error('Error loading chat:', err);
       return null;
     } finally {
       setIsLoading(false);
     }
   }, []);
 
-  // Create a new conversation
+  // Create a new chat
   const create = useCallback(async (title?: string) => {
-    setError(null);
-    try {
-      const conversation = await createConversation(title);
-      setConversations(prev => [conversation, ...prev]);
-      // Load the full conversation detail
-      const detail = await getConversation(conversation.id);
-      setActiveConversation(detail);
-      return conversation;
-    } catch (err) {
-      setError('Failed to create conversation');
-      console.error('Error creating conversation:', err);
+    if (!projectId) {
+      setError('No project selected');
       return null;
     }
-  }, []);
 
-  // Update conversation title
+    setError(null);
+    try {
+      const chat = await createChat(projectId, title);
+      setConversations(prev => [chat, ...prev]);
+      // Load the full chat detail
+      const detail = await getChat(chat.id);
+      setActiveConversation(detail);
+      return chat;
+    } catch (err) {
+      setError('Failed to create chat');
+      console.error('Error creating chat:', err);
+      return null;
+    }
+  }, [projectId]);
+
+  // Update chat title
   const update = useCallback(async (id: string, title: string) => {
     setError(null);
     try {
-      const updated = await updateConversation(id, title);
+      const updated = await updateChat(id, title);
       setConversations(prev =>
         prev.map(c => (c.id === id ? { ...c, title: updated.title } : c))
       );
@@ -76,44 +86,46 @@ export function useConversations() {
       }
       return updated;
     } catch (err) {
-      setError('Failed to update conversation');
-      console.error('Error updating conversation:', err);
+      setError('Failed to update chat');
+      console.error('Error updating chat:', err);
       return null;
     }
   }, [activeConversation?.id]);
 
-  // Delete a conversation
+  // Delete a chat
   const remove = useCallback(async (id: string) => {
     setError(null);
     try {
-      await deleteConversation(id);
+      await deleteChat(id);
       setConversations(prev => prev.filter(c => c.id !== id));
       if (activeConversation?.id === id) {
         setActiveConversation(null);
       }
       return true;
     } catch (err) {
-      setError('Failed to delete conversation');
-      console.error('Error deleting conversation:', err);
+      setError('Failed to delete chat');
+      console.error('Error deleting chat:', err);
       return false;
     }
   }, [activeConversation?.id]);
 
-  // Clear active conversation (start fresh)
+  // Clear active chat (start fresh)
   const clearActive = useCallback(() => {
     setActiveConversation(null);
   }, []);
 
-  // Refresh the active conversation (after new messages)
+  // Refresh the active chat (after new messages)
   const refreshActive = useCallback(async () => {
     if (activeConversation?.id) {
       await loadConversation(activeConversation.id);
     }
   }, [activeConversation?.id, loadConversation]);
 
-  // Load conversations on mount
+  // Load chats when project changes
   useEffect(() => {
     loadConversations();
+    // Clear active conversation when project changes
+    setActiveConversation(null);
   }, [loadConversations]);
 
   return {

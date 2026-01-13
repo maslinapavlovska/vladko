@@ -1,31 +1,44 @@
 import { useState, useEffect, useCallback } from 'react';
-import { listDocuments, uploadDocument, deleteDocument, resetDatabase } from '../services/api';
+import type { Document } from '../types';
+import { listDocuments, uploadDocument, deleteDocument } from '../services/api';
 
-export function useDocuments() {
-  const [documents, setDocuments] = useState<string[]>([]);
+export function useDocuments(projectId: string | null) {
+  const [documents, setDocuments] = useState<Document[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchDocuments = useCallback(async () => {
+    if (!projectId) {
+      setDocuments([]);
+      return;
+    }
+
     try {
-      const docs = await listDocuments();
+      setIsLoading(true);
+      const docs = await listDocuments(projectId);
       setDocuments(docs);
       setError(null);
     } catch (err) {
       setError('Failed to load documents');
       console.error(err);
+    } finally {
+      setIsLoading(false);
     }
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     fetchDocuments();
   }, [fetchDocuments]);
 
   const upload = async (file: File) => {
+    if (!projectId) {
+      throw new Error('No project selected');
+    }
+
     setIsLoading(true);
     setError(null);
     try {
-      const result = await uploadDocument(file);
+      const result = await uploadDocument(file, projectId);
       await fetchDocuments();
       return result;
     } catch (err: unknown) {
@@ -37,29 +50,14 @@ export function useDocuments() {
     }
   };
 
-  const remove = async (filename: string) => {
+  const remove = async (documentId: string) => {
     setIsLoading(true);
     setError(null);
     try {
-      await deleteDocument(filename);
+      await deleteDocument(documentId);
       await fetchDocuments();
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Delete failed';
-      setError(message);
-      throw err;
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const reset = async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      await resetDatabase();
-      setDocuments([]);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Reset failed';
       setError(message);
       throw err;
     } finally {
@@ -73,7 +71,6 @@ export function useDocuments() {
     error,
     upload,
     remove,
-    reset,
     refresh: fetchDocuments,
   };
 }

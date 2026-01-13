@@ -284,30 +284,43 @@ class ConversationService:
         return messages
 
     def search_conversations(self, query: str, limit: int = 20) -> list[dict]:
-        """Full-text search across messages."""
-        search_term = f"%{query}%"
+        """Full-text search across messages (case-insensitive for all languages)."""
+        query_lower = query.lower()
 
         with self._get_connection() as conn:
+            # Fetch all messages and filter in Python for proper Unicode case-insensitive search
             rows = conn.execute(
-                """SELECT DISTINCT c.id, c.title, c.created_at, c.updated_at,
+                """SELECT c.id, c.title, c.created_at, c.updated_at,
                           m.content as matched_content
                    FROM conversations c
                    JOIN messages m ON c.id = m.conversation_id
-                   WHERE m.content LIKE ?
-                   ORDER BY c.updated_at DESC
-                   LIMIT ?""",
-                (search_term, limit)
+                   ORDER BY c.updated_at DESC"""
             ).fetchall()
 
+        # Filter and deduplicate in Python for proper Unicode handling
+        seen_ids = set()
         results = []
         for row in rows:
-            results.append({
-                "id": row["id"],
-                "title": row["title"],
-                "created_at": row["created_at"],
-                "updated_at": row["updated_at"],
-                "matched_content": row["matched_content"][:100] + "..." if len(row["matched_content"]) > 100 else row["matched_content"]
-            })
+            conv_id = row["id"]
+            if conv_id in seen_ids:
+                continue
+
+            content_lower = row["matched_content"].lower()
+            title_lower = row["title"].lower()
+
+            if query_lower in content_lower or query_lower in title_lower:
+                seen_ids.add(conv_id)
+                matched = row["matched_content"]
+                results.append({
+                    "id": conv_id,
+                    "title": row["title"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "matched_content": matched[:100] + "..." if len(matched) > 100 else matched
+                })
+
+            if len(results) >= limit:
+                break
 
         return results
 
